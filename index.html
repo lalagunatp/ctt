@@ -92,6 +92,14 @@ table.dt tr:hover td{background:var(--sf2)}
 .empty-state{text-align:center;padding:40px 20px;color:var(--tx2);font-size:.85rem}
 .seg-badge{display:inline-flex;align-items:center;gap:3px;padding:2px 6px;border-radius:4px;font-size:.64rem;font-weight:600;background:rgba(108,140,255,.12);color:var(--ac);cursor:pointer}
 .seg-badge:hover{background:rgba(108,140,255,.25)}
+.per{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:4px}
+.per-l{font-size:.65rem;color:var(--tx2);font-weight:500;text-transform:uppercase;letter-spacing:.04em}
+.per-btns{display:flex;gap:2px;background:var(--sf2);border-radius:8px;padding:3px;overflow-x:auto;max-width:100%}
+.per-btns button{padding:5px 12px;border-radius:6px;cursor:pointer;font-size:.74rem;font-weight:500;color:var(--tx2);white-space:nowrap;border:none;background:none;font-family:inherit}
+.per-btns button.active{background:var(--ac);color:#fff}
+.per-btns button:hover:not(.active):not(:disabled){color:var(--tx)}
+.per-btns button:disabled{opacity:.4;cursor:not-allowed}
+.per-n{font-size:.7rem;color:var(--tx2)}
 </style>
 </head>
 <body>
@@ -114,6 +122,18 @@ table.dt tr:hover td{background:var(--sf2)}
   </div>
 
   <div id="mainContent" style="display:none">
+    <div class="per">
+      <span class="per-l">Periodo</span>
+      <div class="per-btns" id="periodo">
+        <button data-d="0" class="active">Todo</button>
+        <button data-d="7">7 días</button>
+        <button data-d="15">15 días</button>
+        <button data-d="30">30 días</button>
+        <button data-d="60">60 días</button>
+      </div>
+      <span class="per-n" id="periodoNota"></span>
+    </div>
+
     <div class="kpis" id="kpis"></div>
 
     <div class="tabs" id="mainTabs">
@@ -292,6 +312,8 @@ table.dt tr:hover td{background:var(--sf2)}
 // STATE
 // ============================================================
 let D = null;           // Dashboard data
+let V = null;           // Vista de D filtrada por periodo
+let PERIODO = 0;        // Últimos N días (0 = todo)
 let API_URL = 'https://script.google.com/macros/s/AKfycbzG8uV59Uu8UbYaNmqazPGqvwpIEGazK52UudS_CskAiJfNlP9qA2lDB553zw_wCrMUHg/exec';
 let segData = [];       // Seguimiento records
 let isLive = false;     // Connected to API?
@@ -364,34 +386,141 @@ async function conectar() {
 // ============================================================
 function render() {
   if (!D) return;
+  V = calcularVista();
+  renderPeriodo();
   renderKPIs();
   renderResumen();
   renderClusters();
   renderFallas();
   renderTecnicos();
-  renderAbiertos();
+  renderAbiertos(document.getElementById('fltAb').value, document.getElementById('fltAbCluster').value);
   renderCanceladas();
   renderTendencia();
   renderDateRange();
 }
 
+// ============================================================
+// PERIODO (últimos N días)
+// ============================================================
+// D.casos trae una fila por caso de BD CTT:
+//   [fecha 'YYYY-MM-DD', cuenta (col. G), estatus CTT, OS, cluster, falla N2,
+//    técnico, proveedor, estatus BASE, motivo, con seguimiento (0/1)]
+// Con eso se recalcula todo por periodo y se cuentan cuentas únicas.
+// Si el Apps Script no lo envía, se muestran los totales de D sin filtro.
+// Los N días se cuentan hacia atrás desde la última fecha con datos (corte).
+function restarDias(iso, n) {
+  const d = new Date(iso + 'T12:00:00Z');
+  d.setUTCDate(d.getUTCDate() - n);
+  return d.toISOString().slice(0, 10);
+}
+
+function ordenar(obj, max) {
+  const e = Object.entries(obj).sort((a, b) => b[1] - a[1]);
+  return Object.fromEntries(max ? e.slice(0, max) : e);
+}
+
+function calcularVista() {
+  if (!Array.isArray(D.casos)) return Object.assign({}, D, { sinCasos: true });
+
+  const hasta = D.casos.reduce((m, c) => (c[0] > m ? c[0] : m), '');
+  const desde = PERIODO && hasta ? restarDias(hasta, PERIODO - 1) : '';
+  const V = {
+    total: 0, con_os: 0, cruzadas: 0, terminadas: 0, canceladas_base: 0,
+    estatus_ctt: {}, clusters: {}, fallas: {}, motivos: {}, proveedores: {}, tecnicos: {}, por_fecha: {},
+    con_seguimiento: 0, desde, hasta,
+  };
+  const inc = (o, k) => { o[k] = (o[k] || 0) + 1; };
+  const add = (o, k, v) => (o[k] || (o[k] = new Set())).add(v);
+  const cuentas = new Map(), ctCluster = {}, ctFecha = {};
+
+  for (const [dt, ct, e, os, cl, n2, tec, prov, ef, mot, seg] of D.casos) {
+    if (desde && !(dt >= desde)) continue;
+    V.total++;
+    if (os) V.con_os++;
+    if (ef) V.cruzadas++;
+    if (ef === 'Terminada') V.terminadas++;
+    if (ef === 'Cancelada') V.canceladas_base++;
+    if (seg) V.con_seguimiento++;
+    inc(V.estatus_ctt, e || 'Sin dato');
+    if (cl) inc(V.clusters, cl);
+    if (n2) inc(V.fallas, n2);
+    if (mot) inc(V.motivos, mot);
+    if (prov) inc(V.proveedores, prov);
+    if (tec) inc(V.tecnicos, tec);
+    if (dt) inc(V.por_fecha, dt);
+    const cuenta = String(ct == null ? '' : ct).trim();
+    if (cuenta) {
+      cuentas.set(cuenta, (cuentas.get(cuenta) || 0) + 1);
+      if (cl) add(ctCluster, cl, cuenta);
+      if (dt) add(ctFecha, dt, cuenta);
+    }
+  }
+
+  V.cuentas_unicas = cuentas.size;
+  V.cuentas_repetidas = [...cuentas.values()].filter(n => n > 1).length;
+  V.clusters_cuentas = Object.fromEntries(Object.entries(ctCluster).map(([k, s]) => [k, s.size]));
+  V.por_fecha_cuentas = Object.fromEntries(Object.entries(ctFecha).map(([k, s]) => [k, s.size]));
+  V.estatus_ctt = ordenar(V.estatus_ctt);
+  V.fallas = ordenar(V.fallas);
+  V.motivos = ordenar(V.motivos);
+  V.proveedores = ordenar(V.proveedores);
+  V.tecnicos = ordenar(V.tecnicos, 20);
+
+  const enPeriodo = a => !desde || (a.dt || '') >= desde;
+  V.abiertos = (D.abiertos || []).filter(enPeriodo);
+  V.total_abiertos = desde ? V.abiertos.length : D.total_abiertos;
+  V.canceladas_detail = (D.canceladas_detail || []).filter(enPeriodo);
+  return V;
+}
+
+function renderPeriodo() {
+  const ok = !V.sinCasos;
+  document.querySelectorAll('#periodo button').forEach(b => {
+    const d = Number(b.dataset.d);
+    b.disabled = !ok && d !== 0;
+    b.classList.toggle('active', d === (ok ? PERIODO : 0));
+  });
+  document.getElementById('periodoNota').textContent = ok
+    ? (V.hasta ? 'Último dato: ' + V.hasta : '')
+    : (isLive ? 'Filtro no disponible: falta actualizar el Apps Script' : 'Filtro disponible con datos en vivo');
+}
+
+document.querySelectorAll('#periodo button').forEach(b => b.addEventListener('click', () => {
+  PERIODO = Number(b.dataset.d);
+  try { localStorage.setItem('ctt_periodo', String(PERIODO)); } catch(e) {}
+  render();
+}));
+
+(function() {
+  try {
+    const p = Number(localStorage.getItem('ctt_periodo'));
+    if ([7, 15, 30, 60].includes(p)) PERIODO = p;
+  } catch(e) {}
+})();
+
 function renderDateRange() {
-  const dates = Object.keys(D.por_fecha || {}).sort();
+  const el = document.getElementById('dateRange');
+  if (V.desde) { el.textContent = V.desde + ' → ' + V.hasta; return; }
+  const dates = Object.keys(V.por_fecha || {}).sort();
   if (dates.length) {
-    document.getElementById('dateRange').textContent = dates[0] + ' → ' + dates[dates.length - 1];
+    el.textContent = dates[0] + ' → ' + dates[dates.length - 1];
   }
 }
 
 function renderKPIs() {
-  const pct = D.con_os ? (D.cruzadas / D.con_os * 100).toFixed(0) : 0;
+  const pct = V.con_os ? (V.cruzadas / V.con_os * 100).toFixed(0) : 0;
+  const cuentas = V.sinCasos
+    ? { l: 'Cuentas únicas', v: '—', s: isLive ? 'Falta actualizar Apps Script' : 'Requiere datos en vivo' }
+    : { l: 'Cuentas únicas', v: fmt(V.cuentas_unicas), c: 'var(--ac)', s: fmt(V.cuentas_repetidas) + ' con 2+ casos' };
   const items = [
-    { l: 'Total Casos', v: fmt(D.total) },
-    { l: 'Con OS', v: fmt(D.con_os), s: (D.total ? (D.con_os/D.total*100).toFixed(0) : 0) + '% del total' },
-    { l: 'Cruzadas', v: fmt(D.cruzadas), s: pct + '% de OS' },
-    { l: 'Terminadas', v: fmt(D.terminadas), c: 'var(--gn)', s: 'en BASE' },
-    { l: 'Canceladas', v: fmt(D.canceladas_base), c: 'var(--rd)', s: 'en BASE' },
-    { l: 'Abiertos', v: fmt(D.total_abiertos), c: 'var(--or)', s: 'Nuevo/Reagendado' },
-    { l: 'Con Seguimiento', v: fmt(D.con_seguimiento || 0), c: 'var(--cy)', s: 'registros' },
+    { l: 'Total Casos', v: fmt(V.total), s: V.cuentas_unicas ? (V.total / V.cuentas_unicas).toFixed(2) + ' por cuenta' : '' },
+    cuentas,
+    { l: 'Con OS', v: fmt(V.con_os), s: (V.total ? (V.con_os/V.total*100).toFixed(0) : 0) + '% del total' },
+    { l: 'Cruzadas', v: fmt(V.cruzadas), s: pct + '% de OS' },
+    { l: 'Terminadas', v: fmt(V.terminadas), c: 'var(--gn)', s: 'en BASE' },
+    { l: 'Canceladas', v: fmt(V.canceladas_base), c: 'var(--rd)', s: 'en BASE' },
+    { l: 'Abiertos', v: fmt(V.total_abiertos), c: 'var(--or)', s: 'Nuevo/Reagendado' },
+    { l: 'Con Seguimiento', v: fmt(V.con_seguimiento || 0), c: 'var(--cy)', s: 'registros' },
   ];
   document.getElementById('kpis').innerHTML = items.map(k =>
     `<div class="kpi"><div class="kpi-l">${k.l}</div><div class="kpi-v" style="color:${k.c||'var(--tx)'}">${k.v}</div>${k.s?`<div class="kpi-s">${k.s}</div>`:''}</div>`
@@ -408,28 +537,29 @@ function barChart(id, data, color, max_items) {
 }
 
 function renderResumen() {
-  barChart('chEst', D.estatus_ctt, 'var(--ac)');
-  barChart('chMot', D.motivos, 'var(--pu)', 10);
-  barChart('chProv', D.proveedores, 'var(--cy)');
-  barChart('chFallas', D.fallas, 'var(--or)', 12);
+  barChart('chEst', V.estatus_ctt, 'var(--ac)');
+  barChart('chMot', V.motivos, 'var(--pu)', 10);
+  barChart('chProv', V.proveedores, 'var(--cy)');
+  barChart('chFallas', V.fallas, 'var(--or)', 12);
 }
 
 function renderClusters() {
-  const entries = Object.entries(D.clusters || {}).sort((a, b) => b[1] - a[1]);
-  // Need cruce info per cluster - use motivos or abiertos
-  // Simple table from counts
-  const rows = entries.map(([cl, t]) =>
-    `<tr><td><strong>${cl}</strong></td><td>${fmt(t)}</td></tr>`
-  ).join('');
-  document.getElementById('clTbl').innerHTML = `<table class="dt"><thead><tr><th>Cluster</th><th>Total Casos</th></tr></thead><tbody>${rows}</tbody></table>`;
+  const entries = Object.entries(V.clusters || {}).sort((a, b) => b[1] - a[1]);
+  const cc = V.clusters_cuentas;
+  const rows = entries.map(([cl, t]) => {
+    const n = cc ? cc[cl] || 0 : 0;
+    return `<tr><td><strong>${cl}</strong></td><td>${fmt(t)}</td>${cc ? `<td>${fmt(n)}</td><td>${n ? (t / n).toFixed(2) : '—'}</td>` : ''}</tr>`;
+  }).join('');
+  const th = cc ? '<th>Cuentas únicas</th><th>Casos por cuenta</th>' : '';
+  document.getElementById('clTbl').innerHTML = `<table class="dt"><thead><tr><th>Cluster</th><th>Total Casos</th>${th}</tr></thead><tbody>${rows}</tbody></table>`;
 }
 
 function renderFallas() {
-  barChart('fallasD', D.fallas, 'var(--or)');
+  barChart('fallasD', V.fallas, 'var(--or)');
 }
 
 function renderTecnicos() {
-  const entries = Object.entries(D.tecnicos || {});
+  const entries = Object.entries(V.tecnicos || {});
   const max = entries.length ? entries[0][1] : 1;
   const rows = entries.map(([name, count]) =>
     `<tr><td>${name}</td><td>${fmt(count)}</td><td><div class="bar-fw" style="width:180px"><div class="bar-f" style="width:${count/max*100}%;background:var(--cy)"></div></div></td></tr>`
@@ -438,7 +568,7 @@ function renderTecnicos() {
 }
 
 function renderAbiertos(filter, cluster) {
-  const items = (D.abiertos || []).filter(a => {
+  const items = (V.abiertos || []).filter(a => {
     const f = (filter || '').toLowerCase();
     const cl = cluster || '';
     const matchF = !f || [a.os, a.ct, a.cl, a.n2, a.e, a.tec].some(v => (v || '').toLowerCase().includes(f));
@@ -446,7 +576,7 @@ function renderAbiertos(filter, cluster) {
     return matchF && matchCl;
   });
 
-  document.getElementById('abCnt').textContent = D.total_abiertos || 0;
+  document.getElementById('abCnt').textContent = V.total_abiertos || 0;
   document.getElementById('abCnt2').textContent = items.length;
 
   // Populate cluster filter
@@ -481,7 +611,7 @@ document.getElementById('fltAb').addEventListener('input', e => renderAbiertos(e
 document.getElementById('fltAbCluster').addEventListener('change', e => renderAbiertos(document.getElementById('fltAb').value, e.target.value));
 
 function renderCanceladas() {
-  const items = D.canceladas_detail || [];
+  const items = V.canceladas_detail || [];
   document.getElementById('cxCnt').textContent = items.length;
   const rows = items.map(a => `<tr>
     <td>${a.os}</td><td>${a.ct}</td><td>${a.cl}</td><td title="${a.n2}">${a.n2}</td>
@@ -494,14 +624,19 @@ function renderCanceladas() {
 }
 
 function renderTendencia() {
-  const sorted = Object.entries(D.por_fecha || {}).sort((a, b) => a[0].localeCompare(b[0]));
-  if (!sorted.length) return;
+  const sorted = Object.entries(V.por_fecha || {}).sort((a, b) => a[0].localeCompare(b[0]));
+  if (!sorted.length) {
+    document.getElementById('chTrend').innerHTML = '';
+    document.getElementById('trS').textContent = document.getElementById('trE').textContent = '';
+    return;
+  }
   const max = Math.max(...sorted.map(x => x[1]));
+  const pfc = V.por_fecha_cuentas;
   document.getElementById('chTrend').innerHTML = sorted.map(([dt, v]) => {
     const h = Math.max(3, v / max * 140);
     const d = new Date(dt + 'T12:00:00').getDay();
     const c = (d === 0 || d === 6) ? 'var(--pu)' : 'var(--ac)';
-    return `<div class="chart-bar" style="height:${h}px;background:${c}"><div class="tip">${dt}<br>${v} casos</div></div>`;
+    return `<div class="chart-bar" style="height:${h}px;background:${c}"><div class="tip">${dt}<br>${v} casos${pfc ? `<br>${fmt(pfc[dt] || 0)} cuentas` : ''}</div></div>`;
   }).join('');
   document.getElementById('trS').textContent = sorted[0][0];
   document.getElementById('trE').textContent = sorted[sorted.length - 1][0];
