@@ -179,6 +179,7 @@ table.dt .num{text-align:right}
           </select>
           <select id="fltCtOrden">
             <option value="n">Más reportes</option>
+            <option value="os">Más OS generadas</option>
             <option value="ca">Más cancelados</option>
             <option value="ab">Más abiertos</option>
             <option value="ult">Reporte más reciente</option>
@@ -483,8 +484,12 @@ function calcularVista() {
     if (cuenta) {
       // Por cuenta: atendido = Cerrado, cancelado = Cancelado, el resto abierto (estatus CTT)
       let a = cuentas.get(cuenta);
-      if (!a) cuentas.set(cuenta, a = { ct: cuenta, n: 0, at: 0, ca: 0, ab: 0, cl: '', ult: '' });
+      if (!a) cuentas.set(cuenta, a = { ct: cuenta, n: 0, os: 0, at: 0, ca: 0, ab: 0, cl: '', ult: '' });
       a.n++;
+      if (os) {
+        (a.oss || (a.oss = new Set())).add(os);
+        a.os = a.oss.size;
+      }
       if (e === 'Cerrado') a.at++;
       else if (e === 'Cancelado') a.ca++;
       else a.ab++;
@@ -617,13 +622,14 @@ function renderCuentas(mas) {
     ? (a, b) => porFecha(a, b) || b.n - a.n
     : (a, b) => b[orden] - a[orden] || b.n - a.n || porFecha(a, b));
 
-  const t = { n: 0, at: 0, ca: 0, ab: 0 };
-  items.forEach(a => { t.n += a.n; t.at += a.at; t.ca += a.ca; t.ab += a.ab; });
+  const t = { n: 0, os: 0, at: 0, ca: 0, ab: 0 };
+  items.forEach(a => { t.n += a.n; t.os += a.os; t.at += a.at; t.ca += a.ca; t.ab += a.ab; });
   const pct = v => t.n ? ` (${(v / t.n * 100).toFixed(0)}%)` : '';
   document.getElementById('ctCnt2').textContent = fmt(items.length);
   document.getElementById('ctRes').innerHTML =
     `<span>Cuentas <b>${fmt(items.length)}</b></span>` +
     `<span>Reportes <b>${fmt(t.n)}</b></span>` +
+    `<span>OS generadas <b>${fmt(t.os)}</b>${pct(t.os)}</span>` +
     `<span>Atendidos <b style="color:var(--gn)">${fmt(t.at)}</b>${pct(t.at)}</span>` +
     `<span>Cancelados <b style="color:var(--rd)">${fmt(t.ca)}</b>${pct(t.ca)}</span>` +
     `<span>Abiertos <b style="color:var(--or)">${fmt(t.ab)}</b>${pct(t.ab)}</span>`;
@@ -632,11 +638,12 @@ function renderCuentas(mas) {
   const rows = items.slice(0, ctLimite).map(a => `<tr>
     <td>${a.ct}</td><td>${a.cl || '—'}</td>
     <td class="num"><strong>${fmt(a.n)}</strong></td>
+    <td class="num">${fmt(a.os)}</td>
     ${celda(a.at, 'var(--gn)')}${celda(a.ca, 'var(--rd)')}${celda(a.ab, 'var(--or)')}
     <td>${a.ult || '—'}</td>
   </tr>`).join('');
   document.getElementById('ctTbl').innerHTML = `<table class="dt">
-    <thead><tr><th>Cuenta</th><th>Cluster</th><th class="num">Reportes</th><th class="num">Atendidos</th><th class="num">Cancelados</th><th class="num">Abiertos</th><th>Último reporte</th></tr></thead>
+    <thead><tr><th>Cuenta</th><th>Cluster</th><th class="num">Reportes</th><th class="num">OS generadas</th><th class="num">Atendidos</th><th class="num">Cancelados</th><th class="num">Abiertos</th><th>Último reporte</th></tr></thead>
     <tbody>${rows}</tbody></table>`;
 
   const shown = Math.min(ctLimite, items.length);
