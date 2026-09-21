@@ -100,6 +100,9 @@ table.dt tr:hover td{background:var(--sf2)}
 .per-btns button:hover:not(.active):not(:disabled){color:var(--tx)}
 .per-btns button:disabled{opacity:.4;cursor:not-allowed}
 .per-n{font-size:.7rem;color:var(--tx2)}
+.mini{display:flex;flex-wrap:wrap;gap:4px 18px;margin-bottom:10px;font-size:.75rem;color:var(--tx2)}
+.mini b{font-weight:600;color:var(--tx)}
+table.dt .num{text-align:right}
 </style>
 </head>
 <body>
@@ -138,6 +141,7 @@ table.dt tr:hover td{background:var(--sf2)}
 
     <div class="tabs" id="mainTabs">
       <button class="tab active" data-p="resumen">Resumen</button>
+      <button class="tab" data-p="cuentas">Cuentas<span class="cnt" id="ctCnt"></span></button>
       <button class="tab" data-p="clusters">Clusters</button>
       <button class="tab" data-p="fallas">Fallas</button>
       <button class="tab" data-p="tecnicos">Técnicos</button>
@@ -156,6 +160,32 @@ table.dt tr:hover td{background:var(--sf2)}
       <div class="g2">
         <div class="card"><div class="card-t">Proveedores (última cuadrilla)</div><div id="chProv"></div></div>
         <div class="card"><div class="card-t">Top Fallas (N2)</div><div id="chFallas"></div></div>
+      </div>
+    </div>
+
+    <!-- CUENTAS -->
+    <div class="pnl" id="cuentas">
+      <div class="card" style="margin-top:8px">
+        <div class="card-t">Reportes por cuenta <span class="tg tg-bl" id="ctCnt2"></span></div>
+        <div class="mini" id="ctRes"></div>
+        <div class="flt">
+          <input type="text" id="fltCt" placeholder="Buscar cuenta o cluster...">
+          <select id="fltCtCluster"><option value="">Todos los clusters</option></select>
+          <select id="fltCtTipo">
+            <option value="">Todas las cuentas</option>
+            <option value="rep">Con 2+ reportes</option>
+            <option value="ca">Con cancelados</option>
+            <option value="ab">Con abiertos</option>
+          </select>
+          <select id="fltCtOrden">
+            <option value="n">Más reportes</option>
+            <option value="ca">Más cancelados</option>
+            <option value="ab">Más abiertos</option>
+            <option value="ult">Reporte más reciente</option>
+          </select>
+        </div>
+        <div class="scroll-x"><div id="ctTbl"></div></div>
+        <div id="ctMas" style="text-align:center;margin-top:10px;font-size:.72rem;color:var(--tx2)"></div>
       </div>
     </div>
 
@@ -390,6 +420,7 @@ function render() {
   renderPeriodo();
   renderKPIs();
   renderResumen();
+  renderCuentas();
   renderClusters();
   renderFallas();
   renderTecnicos();
@@ -450,14 +481,25 @@ function calcularVista() {
     if (dt) inc(V.por_fecha, dt);
     const cuenta = String(ct == null ? '' : ct).trim();
     if (cuenta) {
-      cuentas.set(cuenta, (cuentas.get(cuenta) || 0) + 1);
+      // Por cuenta: atendido = Cerrado, cancelado = Cancelado, el resto abierto (estatus CTT)
+      let a = cuentas.get(cuenta);
+      if (!a) cuentas.set(cuenta, a = { ct: cuenta, n: 0, at: 0, ca: 0, ab: 0, cl: '', ult: '' });
+      a.n++;
+      if (e === 'Cerrado') a.at++;
+      else if (e === 'Cancelado') a.ca++;
+      else a.ab++;
+      if ((dt || '') >= a.ult) {
+        a.ult = dt || a.ult;
+        if (cl) a.cl = cl;
+      }
       if (cl) add(ctCluster, cl, cuenta);
       if (dt) add(ctFecha, dt, cuenta);
     }
   }
 
-  V.cuentas_unicas = cuentas.size;
-  V.cuentas_repetidas = [...cuentas.values()].filter(n => n > 1).length;
+  V.cuentas = [...cuentas.values()];
+  V.cuentas_unicas = V.cuentas.length;
+  V.cuentas_repetidas = V.cuentas.filter(a => a.n > 1).length;
   V.clusters_cuentas = Object.fromEntries(Object.entries(ctCluster).map(([k, s]) => [k, s.size]));
   V.por_fecha_cuentas = Object.fromEntries(Object.entries(ctFecha).map(([k, s]) => [k, s.size]));
   V.estatus_ctt = ordenar(V.estatus_ctt);
@@ -542,6 +584,70 @@ function renderResumen() {
   barChart('chProv', V.proveedores, 'var(--cy)');
   barChart('chFallas', V.fallas, 'var(--or)', 12);
 }
+
+let ctLimite = 200;     // Filas visibles en Cuentas
+
+function renderCuentas(mas) {
+  ctLimite = mas ? ctLimite + 200 : 200;
+  const sel = document.getElementById('fltCtCluster');
+  const clSel = sel.value;
+  sel.innerHTML = '<option value="">Todos los clusters</option>' +
+    Object.keys(V.clusters || {}).sort().map(c => `<option${c === clSel ? ' selected' : ''}>${c}</option>`).join('');
+
+  document.getElementById('ctCnt').textContent = V.cuentas ? fmt(V.cuentas_unicas) : '';
+  if (!V.cuentas) {
+    document.getElementById('ctCnt2').textContent = '';
+    document.getElementById('ctRes').innerHTML = '';
+    document.getElementById('ctMas').innerHTML = '';
+    document.getElementById('ctTbl').innerHTML = `<div class="empty-state">${isLive ? 'Falta actualizar el Apps Script para ver las cuentas.' : 'Disponible con datos en vivo.'}</div>`;
+    return;
+  }
+
+  const f = document.getElementById('fltCt').value.trim().toLowerCase();
+  const cl = sel.value;
+  const tipo = document.getElementById('fltCtTipo').value;
+  const orden = document.getElementById('fltCtOrden').value;
+  const items = V.cuentas.filter(a =>
+    (!f || a.ct.toLowerCase().includes(f) || a.cl.toLowerCase().includes(f)) &&
+    (!cl || a.cl === cl) &&
+    (!tipo || (tipo === 'rep' ? a.n > 1 : a[tipo] > 0))
+  );
+  const porFecha = (a, b) => b.ult.localeCompare(a.ult);
+  items.sort(orden === 'ult'
+    ? (a, b) => porFecha(a, b) || b.n - a.n
+    : (a, b) => b[orden] - a[orden] || b.n - a.n || porFecha(a, b));
+
+  const t = { n: 0, at: 0, ca: 0, ab: 0 };
+  items.forEach(a => { t.n += a.n; t.at += a.at; t.ca += a.ca; t.ab += a.ab; });
+  const pct = v => t.n ? ` (${(v / t.n * 100).toFixed(0)}%)` : '';
+  document.getElementById('ctCnt2').textContent = fmt(items.length);
+  document.getElementById('ctRes').innerHTML =
+    `<span>Cuentas <b>${fmt(items.length)}</b></span>` +
+    `<span>Reportes <b>${fmt(t.n)}</b></span>` +
+    `<span>Atendidos <b style="color:var(--gn)">${fmt(t.at)}</b>${pct(t.at)}</span>` +
+    `<span>Cancelados <b style="color:var(--rd)">${fmt(t.ca)}</b>${pct(t.ca)}</span>` +
+    `<span>Abiertos <b style="color:var(--or)">${fmt(t.ab)}</b>${pct(t.ab)}</span>`;
+
+  const celda = (v, c) => `<td class="num"${v ? ` style="color:${c}"` : ''}>${fmt(v)}</td>`;
+  const rows = items.slice(0, ctLimite).map(a => `<tr>
+    <td>${a.ct}</td><td>${a.cl || '—'}</td>
+    <td class="num"><strong>${fmt(a.n)}</strong></td>
+    ${celda(a.at, 'var(--gn)')}${celda(a.ca, 'var(--rd)')}${celda(a.ab, 'var(--or)')}
+    <td>${a.ult || '—'}</td>
+  </tr>`).join('');
+  document.getElementById('ctTbl').innerHTML = `<table class="dt">
+    <thead><tr><th>Cuenta</th><th>Cluster</th><th class="num">Reportes</th><th class="num">Atendidos</th><th class="num">Cancelados</th><th class="num">Abiertos</th><th>Último reporte</th></tr></thead>
+    <tbody>${rows}</tbody></table>`;
+
+  const shown = Math.min(ctLimite, items.length);
+  document.getElementById('ctMas').innerHTML = items.length > shown
+    ? `Mostrando ${fmt(shown)} de ${fmt(items.length)} · <button class="btn btn-sm btn-outline" onclick="renderCuentas(true)">Mostrar 200 más</button>`
+    : '';
+}
+
+['fltCt', 'fltCtCluster', 'fltCtTipo', 'fltCtOrden'].forEach(id =>
+  document.getElementById(id).addEventListener(id === 'fltCt' ? 'input' : 'change', () => renderCuentas())
+);
 
 function renderClusters() {
   const entries = Object.entries(V.clusters || {}).sort((a, b) => b[1] - a[1]);
