@@ -103,6 +103,21 @@ table.dt tr:hover td{background:var(--sf2)}
 .mini{display:flex;flex-wrap:wrap;gap:4px 18px;margin-bottom:10px;font-size:.75rem;color:var(--tx2)}
 .mini b{font-weight:600;color:var(--tx)}
 table.dt .num{text-align:right}
+table.dt tr.clk{cursor:pointer}
+table.dt tr.clk td:first-child{color:var(--ac);font-weight:600}
+.det-h{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+.det-h h3{font-size:1rem;font-weight:700}
+.reps{display:grid;gap:8px}
+.rep{background:var(--sf2);border:1px solid var(--bd);border-radius:8px;padding:10px 12px}
+.rep-top{display:flex;align-items:center;gap:4px 12px;flex-wrap:wrap;font-size:.72rem;color:var(--tx2)}
+.rep-top b{font-size:.8rem;color:var(--tx)}
+.rep-top .tg{margin-left:auto}
+.rep-f{font-size:.82rem;font-weight:600;margin-top:6px}
+.rep-f span{display:block;font-size:.7rem;font-weight:400;color:var(--tx2)}
+.rep-g{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:6px 14px;margin-top:8px;font-size:.75rem}
+.rep-g .k{display:block;font-size:.62rem;color:var(--tx2);text-transform:uppercase;letter-spacing:.03em}
+.rep-n{font-size:.72rem;color:var(--tx2);margin-top:8px}
+.rep-seg{display:flex;align-items:center;gap:6px 10px;flex-wrap:wrap;margin-top:8px;padding-top:8px;border-top:1px solid var(--bd);font-size:.74rem}
 </style>
 </head>
 <body>
@@ -165,8 +180,8 @@ table.dt .num{text-align:right}
 
     <!-- CUENTAS -->
     <div class="pnl" id="cuentas">
-      <div class="card" style="margin-top:8px">
-        <div class="card-t">Reportes por cuenta <span class="tg tg-bl" id="ctCnt2"></span></div>
+      <div class="card" style="margin-top:8px" id="ctLista">
+        <div class="card-t">Reportes por cuenta <span class="tg tg-bl" id="ctCnt2"></span> <span class="per-n">· clic en una cuenta para ver sus reportes</span></div>
         <div class="mini" id="ctRes"></div>
         <div class="flt">
           <input type="text" id="fltCt" placeholder="Buscar cuenta o cluster...">
@@ -188,6 +203,7 @@ table.dt .num{text-align:right}
         <div class="scroll-x"><div id="ctTbl"></div></div>
         <div id="ctMas" style="text-align:center;margin-top:10px;font-size:.72rem;color:var(--tx2)"></div>
       </div>
+      <div class="card" style="margin-top:8px;display:none" id="ctDetalle"></div>
     </div>
 
     <!-- CLUSTERS -->
@@ -422,6 +438,7 @@ function render() {
   renderKPIs();
   renderResumen();
   renderCuentas();
+  if (ctSel) renderCuentaDetalle();
   renderClusters();
   renderFallas();
   renderTecnicos();
@@ -436,7 +453,9 @@ function render() {
 // ============================================================
 // D.casos trae una fila por caso de BD CTT:
 //   [fecha 'YYYY-MM-DD', cuenta (col. G), estatus CTT, OS, cluster, falla N2,
-//    técnico, proveedor, estatus BASE, motivo, con seguimiento (0/1)]
+//    técnico, proveedor, estatus BASE, motivo, con seguimiento (0/1),
+//    folio, N1, N3, fecha asignación OS, fecha completada OS]
+// Los últimos 5 son opcionales (solo los usa el detalle de cuenta).
 // Con eso se recalcula todo por periodo y se cuentan cuentas únicas.
 // Si el Apps Script no lo envía, se muestran los totales de D sin filtro.
 // Los N días se cuentan hacia atrás desde la última fecha con datos (corte).
@@ -532,11 +551,13 @@ function renderPeriodo() {
     : (isLive ? 'Filtro no disponible: falta actualizar el Apps Script' : 'Filtro disponible con datos en vivo');
 }
 
-document.querySelectorAll('#periodo button').forEach(b => b.addEventListener('click', () => {
-  PERIODO = Number(b.dataset.d);
+function setPeriodo(d) {
+  PERIODO = d;
   try { localStorage.setItem('ctt_periodo', String(PERIODO)); } catch(e) {}
   render();
-}));
+}
+
+document.querySelectorAll('#periodo button').forEach(b => b.addEventListener('click', () => setPeriodo(Number(b.dataset.d))));
 
 (function() {
   try {
@@ -635,7 +656,7 @@ function renderCuentas(mas) {
     `<span>Abiertos <b style="color:var(--or)">${fmt(t.ab)}</b>${pct(t.ab)}</span>`;
 
   const celda = (v, c) => `<td class="num"${v ? ` style="color:${c}"` : ''}>${fmt(v)}</td>`;
-  const rows = items.slice(0, ctLimite).map(a => `<tr>
+  const rows = items.slice(0, ctLimite).map(a => `<tr class="clk" data-ct="${a.ct}">
     <td>${a.ct}</td><td>${a.cl || '—'}</td>
     <td class="num"><strong>${fmt(a.n)}</strong></td>
     <td class="num">${fmt(a.os)}</td>
@@ -655,6 +676,119 @@ function renderCuentas(mas) {
 ['fltCt', 'fltCtCluster', 'fltCtTipo', 'fltCtOrden'].forEach(id =>
   document.getElementById(id).addEventListener(id === 'fltCt' ? 'input' : 'change', () => renderCuentas())
 );
+
+document.getElementById('ctTbl').addEventListener('click', e => {
+  const tr = e.target.closest('tr[data-ct]');
+  if (tr) verCuenta(tr.dataset.ct);
+});
+
+// ============================================================
+// DETALLE DE CUENTA (#cuenta=XXXX, funciona con el botón atrás)
+// ============================================================
+let ctSel = '';            // Cuenta abierta en el detalle
+let ctDesdeLista = false;  // Se abrió desde la lista: Volver = atrás del navegador
+let ctScroll = 0;          // Posición de la lista para regresar al mismo punto
+
+function verCuenta(ct) {
+  ctDesdeLista = true;
+  ctScroll = window.scrollY;
+  location.hash = 'cuenta=' + encodeURIComponent(ct);
+}
+
+function volverCuentas() {
+  if (ctDesdeLista) history.back();
+  else location.hash = '';
+}
+
+function rutaCuenta() {
+  const m = location.hash.match(/^#cuenta=(.+)$/);
+  const antes = ctSel;
+  ctSel = m ? decodeURIComponent(m[1]) : '';
+  document.getElementById('ctLista').style.display = ctSel ? 'none' : '';
+  document.getElementById('ctDetalle').style.display = ctSel ? '' : 'none';
+  if (ctSel) {
+    document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x.dataset.p === 'cuentas'));
+    document.querySelectorAll('.pnl').forEach(x => x.classList.toggle('active', x.id === 'cuentas'));
+    if (V) renderCuentaDetalle();
+    document.getElementById('mainTabs').scrollIntoView();
+  } else {
+    ctDesdeLista = false;
+    if (antes) window.scrollTo(0, ctScroll);
+  }
+}
+
+window.addEventListener('hashchange', rutaCuenta);
+
+function renderCuentaDetalle() {
+  const el = document.getElementById('ctDetalle');
+  const head = `<div class="det-h"><button class="btn btn-sm btn-outline" onclick="volverCuentas()">← Volver</button><h3>Cuenta ${ctSel}</h3></div>`;
+  if (V.sinCasos) {
+    el.innerHTML = head + `<div class="empty-state">${isLive ? 'Falta actualizar el Apps Script para ver el detalle.' : 'Disponible con datos en vivo.'}</div>`;
+    return;
+  }
+
+  const todos = D.casos.filter(c => String(c[1] == null ? '' : c[1]).trim() === ctSel);
+  const reps = todos.filter(c => !V.desde || (c[0] || '') >= V.desde)
+    .sort((a, b) => String(b[0] || '').localeCompare(String(a[0] || '')) || String(b[11] || '').localeCompare(String(a[11] || '')));
+  const fuera = todos.length - reps.length;
+  const nota = fuera
+    ? `<div class="rep-n" style="margin:0 0 10px">${fmt(fuera)} reporte${fuera > 1 ? 's' : ''} más fuera del periodo · <button class="btn btn-sm btn-outline" onclick="setPeriodo(0)">Ver todo</button></div>`
+    : '';
+  if (!reps.length) {
+    el.innerHTML = head + nota + `<div class="empty-state">${todos.length ? 'Sin reportes en el periodo seleccionado.' : 'No hay reportes para esta cuenta.'}</div>`;
+    return;
+  }
+
+  const t = { at: 0, ca: 0, ab: 0 }, oss = new Set(), cls = new Set();
+  reps.forEach(c => {
+    if (c[2] === 'Cerrado') t.at++;
+    else if (c[2] === 'Cancelado') t.ca++;
+    else t.ab++;
+    if (c[3]) oss.add(c[3]);
+    if (c[4]) cls.add(c[4]);
+  });
+  const res = `<div class="mini">
+    <span>Reportes <b>${fmt(reps.length)}</b></span>
+    <span>OS generadas <b>${fmt(oss.size)}</b></span>
+    <span>Atendidos <b style="color:var(--gn)">${fmt(t.at)}</b></span>
+    <span>Cancelados <b style="color:var(--rd)">${fmt(t.ca)}</b></span>
+    <span>Abiertos <b style="color:var(--or)">${fmt(t.ab)}</b></span>
+    <span>Cluster <b>${[...cls].join(', ') || '—'}</b></span>
+    <span>Del <b>${reps[reps.length - 1][0] || '—'}</b> al <b>${reps[0][0] || '—'}</b></span>
+  </div>`;
+
+  const campo = (k, v) => v ? `<div><span class="k">${k}</span>${v}</div>` : '';
+  const eTag = e => e === 'Cerrado' ? 'tg-gn' : e === 'Cancelado' ? 'tg-rd' : 'tg-or';
+  const cards = reps.map(c => {
+    const [dt, , e, os, cl, n2, tec, prov, ef, mot, , f, n1, n3, fa, fc] = c;
+    const reporto = [n1, n3].filter(Boolean).join(' › ');
+    const osInfo = !os ? '<div class="rep-n">Sin OS generada</div>' : `<div class="rep-g">
+        ${campo('OS', os)}
+        ${campo('Estatus OS', ef ? `<span class="tg ${ef === 'Terminada' ? 'tg-gn' : 'tg-rd'}">${ef}</span>` : 'Sin cruce con BASE')}
+        ${campo('Atendió', tec)}
+        ${campo('Proveedor', prov)}
+        ${campo('Asignada', fa)}
+        ${campo('Completada', fc)}
+        ${mot && mot !== ef && mot !== 'Sin cruce' ? campo('Motivo', mot) : ''}
+      </div>`;
+    const segs = os ? segData.filter(s => (s.OS || s.os) === os) : [];
+    const s = segs[0];
+    const seg = !os ? '' : `<div class="rep-seg">
+        ${s ? `<span class="tg ${resTag(s.RESULTADO || s.resultado)}">${s.RESULTADO || s.resultado}</span>
+          <span>${s.COMENTARIO || s.comentario || ''}</span>
+          <span style="color:var(--tx2)">${[s.QUIEN_REPORTA || s.quien_reporta, s.MARCA_TIEMPO].filter(Boolean).join(' · ')}${segs.length > 1 ? ` · ${segs.length} registros` : ''}</span>`
+          : '<span style="color:var(--tx2)">Sin seguimiento</span>'}
+        <button class="btn btn-sm btn-outline" style="margin-left:auto" onclick="abrirFormSeg('${os}','${ctSel}','${cl}')">+ Seguimiento</button>
+      </div>`;
+    return `<div class="rep">
+      <div class="rep-top"><b>${dt || 'Sin fecha'}</b>${f ? `<span>Folio ${f}</span>` : ''}${cl ? `<span>${cl}</span>` : ''}<span class="tg ${eTag(e)}">${e || 'Sin estatus'}</span></div>
+      <div class="rep-f">${n2 || 'Sin falla registrada'}${reporto ? `<span>${reporto}</span>` : ''}</div>
+      ${osInfo}${seg}
+    </div>`;
+  }).join('');
+
+  el.innerHTML = head + res + nota + `<div class="reps">${cards}</div>`;
+}
 
 function renderClusters() {
   const entries = Object.entries(V.clusters || {}).sort((a, b) => b[1] - a[1]);
@@ -850,6 +984,7 @@ async function enviarSeguimiento() {
     toast('Registro guardado localmente (conecta Apps Script para persistir)');
     cerrarModal();
     renderSeguimiento();
+    if (ctSel) renderCuentaDetalle();
   }
 }
 
@@ -861,10 +996,20 @@ async function cargarSeguimiento() {
     if (result.rows) {
       segData = result.rows;
       renderSeguimiento();
+      if (ctSel) renderCuentaDetalle();
     }
   } catch (err) {
     console.error('Error cargando seguimiento:', err);
   }
+}
+
+function resTag(res) {
+  if (res === 'Rescatada') return 'tg-gn';
+  if (res === 'No rescatada') return 'tg-rd';
+  if (res === 'En proceso') return 'tg-yl';
+  if (res === 'Pendiente visita') return 'tg-or';
+  if (res === 'Cliente no localizado') return 'tg-pu';
+  return 'tg-bl';
 }
 
 function renderSeguimiento(filter, resultado) {
@@ -883,16 +1028,7 @@ function renderSeguimiento(filter, resultado) {
     return;
   }
 
-  const resTag = res => {
-    if (res === 'Rescatada') return 'tg-gn';
-    if (res === 'No rescatada') return 'tg-rd';
-    if (res === 'En proceso') return 'tg-yl';
-    if (res === 'Pendiente visita') return 'tg-or';
-    if (res === 'Cliente no localizado') return 'tg-pu';
-    return 'tg-bl';
-  };
-
-  const g = (item, ...keys) => {
+  const g =(item, ...keys) => {
     for (const k of keys) if (item[k]) return item[k];
     return '';
   };
@@ -971,6 +1107,9 @@ document.getElementById('modalSeg').addEventListener('click', e => {
     console.warn('API error, using local data:', err.message);
   }
 })();
+
+// Abrir el detalle si la página se cargó con #cuenta=XXXX
+rutaCuenta();
 </script>
 </body>
 </html>
