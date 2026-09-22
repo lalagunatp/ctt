@@ -186,6 +186,7 @@ function getDashboardData() {
       e: estatus,
       os: os,
       ct: cuenta,
+      n1: String(row[iN1] || ''),
       n2: n2,
       n3: String(row[iN3] || ''),
       rp: row[iRepetido] === true ? 1 : 0,
@@ -195,6 +196,8 @@ function getDashboardData() {
       prov: match ? match.prov : '',
       ef: match ? match.ef : '',
       mot: mot,
+      fa: match ? match.fa : '',
+      fc: match ? match.fc : '',
       seg: seg ? seg.resultado : '',
       segN: seg ? seg.registros : 0,
     };
@@ -232,11 +235,13 @@ function getDashboardData() {
   stats.canceladas_detail = canceladas;
 
   // Una fila compacta por caso: el dashboard la usa para filtrar por
-  // periodo (7/15/30/60 días) y contar cuentas únicas.
+  // periodo (7/15/30/60 días), contar cuentas únicas y el detalle por cuenta.
   // [fecha, cuenta, estatus, OS, cluster, falla N2, técnico, proveedor,
-  //  estatus BASE, motivo, con seguimiento (0/1)]
+  //  estatus BASE, motivo, con seguimiento (0/1),
+  //  folio, N1, N3, fecha asignación OS, fecha completada OS]
   stats.casos = records.map(r => [
-    r.dt, r.ct, r.e, r.os, r.cl, r.n2, r.tec, r.prov, r.ef, r.mot, r.segN ? 1 : 0
+    r.dt, r.ct, r.e, r.os, r.cl, r.n2, r.tec, r.prov, r.ef, r.mot, r.segN ? 1 : 0,
+    r.f, r.n1, r.n3, r.fa, r.fc
   ]);
 
   return stats;
