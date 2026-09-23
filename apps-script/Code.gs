@@ -14,6 +14,30 @@ const HOJA_SEGUIMIENTO = 'SEGUIMIENTO';     // Nueva hoja de seguimiento
 
 // ---- COLUMNAS FIJAS DE BD CTT ----
 const COL_CUENTA = 6;                       // Columna G = número de cuenta
+const COL_FECHA  = 5;                       // Columna F = FECHA/HORA del reporte
+
+// Convierte el valor de FECHA/HORA a ['yyyy-MM-dd', 'HH:mm'].
+// Acepta fecha real de la hoja o texto tipo 24/07/2026 18:34 o 2026-07-24 18:34.
+function fechaHora_(v) {
+  let d = null;
+  if (v instanceof Date) {
+    d = v;
+  } else if (v) {
+    const s = String(v).trim();
+    let m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:[ ,]+(\d{1,2}):(\d{2}))?/);
+    if (m) d = new Date(+m[3], +m[2] - 1, +m[1], +(m[4] || 0), +(m[5] || 0));
+    else {
+      m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{2}))?/);
+      if (m) d = new Date(+m[1], +m[2] - 1, +m[3], +(m[4] || 0), +(m[5] || 0));
+      else { const p = new Date(s); if (!isNaN(p.getTime())) d = p; }
+    }
+  }
+  if (!d || isNaN(d.getTime())) return ['', ''];
+  return [
+    Utilities.formatDate(d, 'America/Mexico_City', 'yyyy-MM-dd'),
+    Utilities.formatDate(d, 'America/Mexico_City', 'HH:mm')
+  ];
+}
 
 // ================================================================
 // doGet — Sirve datos al dashboard
@@ -92,7 +116,6 @@ function getDashboardData() {
   const iRepetido  = cttHeaders.indexOf('REPETIDO');
   const iOLT       = cttHeaders.indexOf('OLT');
   const iCluster   = cttHeaders.indexOf('CLUSTER');
-  const iFecha     = cttHeaders.indexOf('FECHA');
 
   // Índices OS
   const iOS_os     = osHeaders.indexOf('OS');
@@ -168,7 +191,9 @@ function getDashboardData() {
     const cluster = String(row[iCluster] || '');
     const n2 = String(row[iN2] || '');
     const cuenta = String(row[COL_CUENTA] || '').trim();
-    const fecha = row[iFecha] ? Utilities.formatDate(new Date(row[iFecha]), 'America/Mexico_City', 'yyyy-MM-dd') : '';
+    const fh = fechaHora_(row[COL_FECHA]);
+    const fecha = fh[0];
+    const hora = fh[1];
 
     const match = os ? osMap[os] : null;
     const seg = os ? segMap[os] : null;
@@ -192,6 +217,7 @@ function getDashboardData() {
       rp: row[iRepetido] === true ? 1 : 0,
       cl: cluster,
       dt: fecha,
+      hr: hora,
       tec: match ? match.tec : '',
       prov: match ? match.prov : '',
       ef: match ? match.ef : '',
@@ -238,10 +264,10 @@ function getDashboardData() {
   // periodo (7/15/30/60 días), contar cuentas únicas y el detalle por cuenta.
   // [fecha, cuenta, estatus, OS, cluster, falla N2, técnico, proveedor,
   //  estatus BASE, motivo, con seguimiento (0/1),
-  //  folio, N1, N3, fecha asignación OS, fecha completada OS]
+  //  folio, N1, N3, fecha asignación OS, fecha completada OS, hora del reporte]
   stats.casos = records.map(r => [
     r.dt, r.ct, r.e, r.os, r.cl, r.n2, r.tec, r.prov, r.ef, r.mot, r.segN ? 1 : 0,
-    r.f, r.n1, r.n3, r.fa, r.fc
+    r.f, r.n1, r.n3, r.fa, r.fc, r.hr
   ]);
 
   return stats;
