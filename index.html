@@ -454,8 +454,8 @@ function render() {
 // D.casos trae una fila por caso de BD CTT:
 //   [fecha 'YYYY-MM-DD', cuenta (col. G), estatus CTT, OS, cluster, falla N2,
 //    técnico, proveedor, estatus BASE, motivo, con seguimiento (0/1),
-//    folio, N1, N3, fecha asignación OS, fecha completada OS]
-// Los últimos 5 son opcionales (solo los usa el detalle de cuenta).
+//    folio, N1, N3, fecha asignación OS, fecha completada OS, hora del reporte]
+// Los últimos 6 son opcionales (solo los usa el detalle de cuenta).
 // Con eso se recalcula todo por periodo y se cuentan cuentas únicas.
 // Si el Apps Script no lo envía, se muestran los totales de D sin filtro.
 // Los N días se cuentan hacia atrás desde la última fecha con datos (corte).
@@ -540,15 +540,17 @@ function calcularVista() {
 }
 
 function renderPeriodo() {
-  const ok = !V.sinCasos;
+  const ok = !V.sinCasos && !!V.hasta;
   document.querySelectorAll('#periodo button').forEach(b => {
     const d = Number(b.dataset.d);
     b.disabled = !ok && d !== 0;
     b.classList.toggle('active', d === (ok ? PERIODO : 0));
   });
-  document.getElementById('periodoNota').textContent = ok
-    ? (V.hasta ? 'Último dato: ' + V.hasta : '')
-    : (isLive ? 'Filtro no disponible: falta actualizar el Apps Script' : 'Filtro disponible con datos en vivo');
+  let nota;
+  if (ok) nota = 'Último dato: ' + V.hasta;
+  else if (V.sinCasos) nota = isLive ? 'Filtro no disponible: falta actualizar el Apps Script' : 'Filtro disponible con datos en vivo';
+  else nota = 'Los casos llegan sin fecha: revisa la columna FECHA/HORA de BD CTT';
+  document.getElementById('periodoNota').textContent = nota;
 }
 
 function setPeriodo(d) {
@@ -570,9 +572,7 @@ function renderDateRange() {
   const el = document.getElementById('dateRange');
   if (V.desde) { el.textContent = V.desde + ' → ' + V.hasta; return; }
   const dates = Object.keys(V.por_fecha || {}).sort();
-  if (dates.length) {
-    el.textContent = dates[0] + ' → ' + dates[dates.length - 1];
-  }
+  el.textContent = dates.length ? dates[0] + ' → ' + dates[dates.length - 1] : 'Sin fechas';
 }
 
 function renderKPIs() {
@@ -728,8 +728,9 @@ function renderCuentaDetalle() {
   }
 
   const todos = D.casos.filter(c => String(c[1] == null ? '' : c[1]).trim() === ctSel);
+  const cuando = c => (c[0] || '') + ' ' + (c[16] || '');
   const reps = todos.filter(c => !V.desde || (c[0] || '') >= V.desde)
-    .sort((a, b) => String(b[0] || '').localeCompare(String(a[0] || '')) || String(b[11] || '').localeCompare(String(a[11] || '')));
+    .sort((a, b) => cuando(b).localeCompare(cuando(a)) || String(b[11] || '').localeCompare(String(a[11] || '')));
   const fuera = todos.length - reps.length;
   const nota = fuera
     ? `<div class="rep-n" style="margin:0 0 10px">${fmt(fuera)} reporte${fuera > 1 ? 's' : ''} más fuera del periodo · <button class="btn btn-sm btn-outline" onclick="setPeriodo(0)">Ver todo</button></div>`
@@ -760,7 +761,7 @@ function renderCuentaDetalle() {
   const campo = (k, v) => v ? `<div><span class="k">${k}</span>${v}</div>` : '';
   const eTag = e => e === 'Cerrado' ? 'tg-gn' : e === 'Cancelado' ? 'tg-rd' : 'tg-or';
   const cards = reps.map(c => {
-    const [dt, , e, os, cl, n2, tec, prov, ef, mot, , f, n1, n3, fa, fc] = c;
+    const [dt, , e, os, cl, n2, tec, prov, ef, mot, , f, n1, n3, fa, fc, hr] = c;
     const reporto = [n1, n3].filter(Boolean).join(' › ');
     const osInfo = !os ? '<div class="rep-n">Sin OS generada</div>' : `<div class="rep-g">
         ${campo('OS', os)}
@@ -781,7 +782,7 @@ function renderCuentaDetalle() {
         <button class="btn btn-sm btn-outline" style="margin-left:auto" onclick="abrirFormSeg('${os}','${ctSel}','${cl}')">+ Seguimiento</button>
       </div>`;
     return `<div class="rep">
-      <div class="rep-top"><b>${dt || 'Sin fecha'}</b>${f ? `<span>Folio ${f}</span>` : ''}${cl ? `<span>${cl}</span>` : ''}<span class="tg ${eTag(e)}">${e || 'Sin estatus'}</span></div>
+      <div class="rep-top"><b>${dt || 'Sin fecha'}${hr ? ' ' + hr : ''}</b>${f ? `<span>Folio ${f}</span>` : ''}${cl ? `<span>${cl}</span>` : ''}<span class="tg ${eTag(e)}">${e || 'Sin estatus'}</span></div>
       <div class="rep-f">${n2 || 'Sin falla registrada'}${reporto ? `<span>${reporto}</span>` : ''}</div>
       ${osInfo}${seg}
     </div>`;
