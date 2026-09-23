@@ -117,6 +117,9 @@ table.dt tr.clk td:first-child{color:var(--ac);font-weight:600}
 .rep-g{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:6px 14px;margin-top:8px;font-size:.75rem}
 .rep-g .k{display:block;font-size:.62rem;color:var(--tx2);text-transform:uppercase;letter-spacing:.03em}
 .rep-n{font-size:.72rem;color:var(--tx2);margin-top:8px}
+.rep-cie{margin-top:8px;padding-top:8px;border-top:1px dashed var(--bd)}
+.rep-cie>.k{font-size:.62rem;font-weight:700;color:var(--tx2);text-transform:uppercase;letter-spacing:.03em}
+.rep-cie .rep-g{margin-top:4px}
 .rep-seg{display:flex;align-items:center;gap:6px 10px;flex-wrap:wrap;margin-top:8px;padding-top:8px;border-top:1px solid var(--bd);font-size:.74rem}
 </style>
 </head>
@@ -772,6 +775,21 @@ function renderCuentaDetalle() {
         ${campo('Completada', fc)}
         ${mot && mot !== ef && mot !== 'Sin cruce' ? campo('Motivo', mot) : ''}
       </div>`;
+    const cierres = os && D.cierres ? (D.cierres[os] || []) : [];
+    const cierre = !os || !D.cierres ? '' : !cierres.length
+      ? '<div class="rep-n">Sin cierre</div>'
+      : cierres.map(([falla, causa, sol, pi, pf, pit], i) => `<div class="rep-cie">
+          <div class="k">Cierre OS${cierres.length > 1 ? ` ${i + 1} de ${cierres.length}` : ''}</div>
+          <div class="rep-g">
+            ${campo('Falla', falla)}
+            ${campo('Causa', causa)}
+            ${campo('Solución', sol)}
+            ${campo('Potencia inicial', pi)}
+            ${campo('Potencia final', pf)}
+            ${campo('Potencia inicial ticket', pit)}
+          </div>
+          ${[falla, causa, sol, pi, pf, pit].some(Boolean) ? '' : '<div class="rep-n" style="margin-top:4px">Registro sin datos</div>'}
+        </div>`).join('');
     const segs = os ? segData.filter(s => (s.OS || s.os) === os) : [];
     const s = segs[0];
     const seg = !os ? '' : `<div class="rep-seg">
@@ -784,7 +802,7 @@ function renderCuentaDetalle() {
     return `<div class="rep">
       <div class="rep-top"><b>${dt || 'Sin fecha'}${hr ? ' ' + hr : ''}</b>${f ? `<span>Folio ${f}</span>` : ''}${cl ? `<span>${cl}</span>` : ''}<span class="tg ${eTag(e)}">${e || 'Sin estatus'}</span></div>
       <div class="rep-f">${n2 || 'Sin falla registrada'}${reporto ? `<span>${reporto}</span>` : ''}</div>
-      ${osInfo}${seg}
+      ${osInfo}${cierre}${seg}
     </div>`;
   }).join('');
 

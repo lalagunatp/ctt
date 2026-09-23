@@ -11,10 +11,17 @@ const HOJA_CTT        = 'BD CTT';           // Hoja con los casos CTT
 const HOJA_OS         = 'OS POR INSTALAR';  // Hoja con OS + cuadrilla/técnico
 const HOJA_ATENCION   = 'ATENCION ORDENES'; // Atención de órdenes
 const HOJA_SEGUIMIENTO = 'SEGUIMIENTO';     // Nueva hoja de seguimiento
+const HOJA_CIERRE     = 'CIERRE OS';        // Cierre de OS: falla, causa, solución, potencias
 
 // ---- COLUMNAS FIJAS DE BD CTT ----
 const COL_CUENTA = 6;                       // Columna G = número de cuenta
 const COL_FECHA  = 5;                       // Columna F = FECHA/HORA del reporte
+
+// ---- COLUMNAS FIJAS DE CIERRE OS (fila 1 = encabezados) ----
+const COL_CIERRE_OS = 2;                    // Columna C = OS
+// Columnas AM..AR: Falla, Causa, Solución, Potencia inicial,
+// Potencia final, Potencia inicial ticket
+const COLS_CIERRE = [38, 39, 40, 41, 42, 43];
 
 // Convierte el valor de FECHA/HORA a ['yyyy-MM-dd', 'HH:mm'].
 // Acepta fecha real de la hoja o texto tipo 24/07/2026 18:34 o 2026-07-24 18:34.
@@ -270,7 +277,30 @@ function getDashboardData() {
     r.f, r.n1, r.n3, r.fa, r.fc, r.hr
   ]);
 
+  // 5. Cierres de OS (solo las OS que aparecen en BD CTT).
+  // { OS: [[falla, causa, solución, pot. inicial, pot. final, pot. inicial ticket], ...] }
+  // Una entrada por cada fila de CIERRE OS con esa OS, en el orden de la hoja.
+  stats.cierres = getCierres_(ss, new Set(records.map(r => r.os).filter(Boolean)));
+
   return stats;
+}
+
+// ================================================================
+// getCierres_ — Lee CIERRE OS y agrupa por OS (columna C)
+// ================================================================
+function getCierres_(ss, osSet) {
+  const sheet = ss.getSheetByName(HOJA_CIERRE);
+  const cierres = {};
+  if (!sheet || sheet.getLastRow() < 2) return cierres;
+  // Valores tal como se ven en la hoja (respeta el formato de las potencias)
+  const ancho = Math.min(Math.max(...COLS_CIERRE) + 1, sheet.getLastColumn());
+  const data = sheet.getRange(2, 1, sheet.getLastRow() - 1, ancho).getDisplayValues();
+  for (const row of data) {
+    const os = String(row[COL_CIERRE_OS] || '').trim();
+    if (!os || !osSet.has(os)) continue;
+    (cierres[os] = cierres[os] || []).push(COLS_CIERRE.map(i => String(row[i] || '').trim()));
+  }
+  return cierres;
 }
 
 // ================================================================
