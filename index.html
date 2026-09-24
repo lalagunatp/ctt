@@ -109,6 +109,7 @@ table.dt tr:hover td{background:var(--sf2)}
 table.dt .num{text-align:right}
 table.dt tr.clk{cursor:pointer}
 table.dt tr.clk td:first-child{color:var(--ac);font-weight:600}
+table.dt tr.sel td{background:var(--sf2)}
 .det-h{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px}
 .det-h h3{font-size:1rem;font-weight:700}
 .reps{display:grid;gap:8px}
@@ -182,7 +183,7 @@ table.dt tr.clk td:first-child{color:var(--ac);font-weight:600}
       <div class="card" style="display:none" id="resLista"></div>
       <div class="g2">
         <div class="card"><div class="card-t">Proveedores (última cuadrilla)</div><div id="chProv"></div></div>
-        <div class="card"><div class="card-t">Top Fallas (N2)</div><div id="chFallas"></div></div>
+        <div class="card"><div class="card-t" id="chFallasT">Top Fallas (N2)</div><div id="chFallas"></div></div>
       </div>
     </div>
 
@@ -225,7 +226,12 @@ table.dt tr.clk td:first-child{color:var(--ac);font-weight:600}
     <!-- FALLAS -->
     <div class="pnl" id="fallas">
       <div class="card" style="margin-top:8px">
-        <div class="card-t">Tipos de Falla (N2)</div>
+        <div class="card-t">Fallas de cierre OS (CIERRE OS, col. AM) <span class="per-n">· clic en una falla para ver sus cuentas</span></div>
+        <div class="scroll-x" id="faAm"></div>
+      </div>
+      <div class="card" style="display:none" id="faLista"></div>
+      <div class="card">
+        <div class="card-t">Tipos de Falla (N2) <span class="per-n">· reporte CTT</span></div>
         <div id="fallasD"></div>
       </div>
     </div>
@@ -491,6 +497,7 @@ function calcularVista() {
   const inc = (o, k) => { o[k] = (o[k] || 0) + 1; };
   const add = (o, k, v) => (o[k] || (o[k] = new Set())).add(v);
   const cuentas = new Map(), ctCluster = {}, ctFecha = {};
+  const amCt = {}, amOs = {}, ctConOs = new Set();   // Falla de cierre (col. AM) → cuentas / OS
 
   for (const [dt, ct, e, os, cl, n2, tec, prov, ef, mot, seg] of D.casos) {
     if (desde && !(dt >= desde)) continue;
@@ -527,6 +534,18 @@ function calcularVista() {
       if (cl) add(ctCluster, cl, cuenta);
       if (dt) add(ctFecha, dt, cuenta);
     }
+    if (D.cierres) {
+      for (const f of fallasCierre(os)) {
+        if (cuenta) add(amCt, f, cuenta);
+        add(amOs, f, os);
+      }
+      if (os && cuenta) ctConOs.add(cuenta);
+    }
+  }
+  if (D.cierres) {
+    V.fallas_am = ordenar(Object.fromEntries(Object.entries(amCt).map(([k, s]) => [k, s.size])));
+    V.fallas_am_os = Object.fromEntries(Object.entries(amOs).map(([k, s]) => [k, s.size]));
+    V.cuentas_con_os = ctConOs.size;
   }
 
   V.cuentas = [...cuentas.values()];
@@ -614,47 +633,79 @@ function barChart(id, data, color, max_items, clic, sel) {
 }
 
 // ============================================================
-// RESUMEN: clic en Estatus CTT / Resultado del Cruce → cuentas
+// LISTAS DE CUENTAS: clic en una barra (Resumen / Fallas) → cuentas
 // ============================================================
-let resSel = null;      // { tipo: 'est' | 'mot', k }
-let resLimite = 200;
+// Falla de cierre de una OS = columna AM de CIERRE OS (D.cierres[os][i][0])
+function fallasCierre(os) {
+  if (!os) return [];
+  const cs = D.cierres && D.cierres[os];
+  if (!cs || !cs.length) return ['Sin cierre'];
+  return [...new Set(cs.map(x => x[0] || 'Sin dato'))];
+}
+
+const FILTROS = {
+  est: { t: 'Estatus CTT', col: 'En este estatus', f: (c, k) => (c[2] || 'Sin dato') === k },
+  mot: { t: 'Resultado del cruce', col: 'Con este resultado', f: (c, k) => c[9] === k },
+  am:  { t: 'Falla de cierre OS', col: 'Con esta falla', f: (c, k) => fallasCierre(c[3]).includes(k) },
+  n2:  { t: 'Falla N2', col: 'Con esta falla', f: (c, k) => c[5] === k },
+};
+// Una lista por pestaña; sel = { tipo, k }
+const LISTAS = {
+  resumen: { el: 'resLista', sel: null, lim: 200 },
+  fallas:  { el: 'faLista', sel: null, lim: 200 },
+};
+const selDe = (p, tipo) => LISTAS[p].sel && LISTAS[p].sel.tipo === tipo ? LISTAS[p].sel.k : null;
 
 function renderResumen() {
   const clic = !V.sinCasos;
-  barChart('chEst', V.estatus_ctt, 'var(--ac)', 0, clic, resSel && resSel.tipo === 'est' ? resSel.k : null);
-  barChart('chMot', V.motivos, 'var(--pu)', 10, clic, resSel && resSel.tipo === 'mot' ? resSel.k : null);
+  barChart('chEst', V.estatus_ctt, 'var(--ac)', 0, clic, selDe('resumen', 'est'));
+  barChart('chMot', V.motivos, 'var(--pu)', 10, clic, selDe('resumen', 'mot'));
   barChart('chProv', V.proveedores, 'var(--cy)');
-  barChart('chFallas', V.fallas, 'var(--or)', 12);
-  renderResLista();
+  if (V.fallas_am) {
+    document.getElementById('chFallasT').textContent = 'Top Fallas (cierre OS) · cuentas';
+    barChart('chFallas', V.fallas_am, 'var(--or)', 12, true, selDe('resumen', 'am'));
+  } else {
+    document.getElementById('chFallasT').textContent = 'Top Fallas (N2)';
+    barChart('chFallas', V.fallas, 'var(--or)', 12, clic, selDe('resumen', 'n2'));
+  }
+  renderLista('resumen');
 }
 
-function selResumen(tipo, k) {
-  resSel = resSel && resSel.tipo === tipo && resSel.k === k ? null : { tipo, k };
-  renderResumen();
-  if (resSel) document.getElementById('resLista').scrollIntoView({ behavior: 'smooth', block: 'start' });
+function selLista(p, tipo, k) {
+  const L = LISTAS[p];
+  L.sel = L.sel && L.sel.tipo === tipo && L.sel.k === k ? null : { tipo, k };
+  if (p === 'resumen') renderResumen(); else renderFallas();
+  if (L.sel) document.getElementById(L.el).scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
-[['chEst', 'est'], ['chMot', 'mot']].forEach(([id, tipo]) =>
+function cerrarLista(p) {
+  LISTAS[p].sel = null;
+  if (p === 'resumen') renderResumen(); else renderFallas();
+}
+
+[['chEst', 'resumen', 'est'], ['chMot', 'resumen', 'mot'], ['chFallas', 'resumen', () => V.fallas_am ? 'am' : 'n2'],
+ ['faAm', 'fallas', 'am'], ['fallasD', 'fallas', 'n2']].forEach(([id, p, tipo]) =>
   document.getElementById(id).addEventListener('click', e => {
-    const row = e.target.closest('.bar-row[data-k]');
-    if (row) selResumen(tipo, row.dataset.k);
+    const row = e.target.closest('[data-k]');
+    if (row) selLista(p, typeof tipo === 'function' ? tipo() : tipo, row.dataset.k);
   })
 );
 
-function renderResLista(mas) {
-  const el = document.getElementById('resLista');
-  if (!resSel || V.sinCasos) { el.style.display = 'none'; return; }
-  resLimite = mas ? resLimite + 200 : 200;
+function renderLista(p, mas) {
+  const L = LISTAS[p];
+  const el = document.getElementById(L.el);
+  if (!L.sel || V.sinCasos) { el.style.display = 'none'; return; }
+  L.lim = mas ? L.lim + 200 : 200;
   el.style.display = '';
 
   // Casos del periodo que caen en la barra elegida, agrupados por cuenta
-  const { tipo, k } = resSel;
-  const coincide = tipo === 'est' ? c => (c[2] || 'Sin dato') === k : c => c[9] === k;
+  const { tipo, k } = L.sel;
+  const F = FILTROS[tipo];
   const ctas = new Map();
   let nRep = 0;
   for (const c of D.casos) {
     if (V.desde && !((c[0] || '') >= V.desde)) continue;
-    if (!coincide(c)) continue;
+    if (!F.f(c, k)) continue;
     const ct = String(c[1] == null ? '' : c[1]).trim();
     if (!ct) continue;
     nRep++;
@@ -667,31 +718,31 @@ function renderResLista(mas) {
   const tot = new Map((V.cuentas || []).map(a => [a.ct, a.n]));
   const items = [...ctas.values()].sort((a, b) => b.n - a.n || b.ult.localeCompare(a.ult));
 
-  const titulo = (tipo === 'est' ? 'Estatus CTT' : 'Resultado del cruce') + ': ' + k;
-  const rows = items.slice(0, resLimite).map(a => `<tr class="clk" data-ct="${attr(a.ct)}">
+  const titulo = F.t + ': ' + k;
+  const rows = items.slice(0, L.lim).map(a => `<tr class="clk" data-ct="${attr(a.ct)}">
     <td>${a.ct}</td><td>${a.cl || '—'}</td>
     <td class="num"><strong>${fmt(a.n)}</strong></td>
     <td class="num">${fmt(tot.get(a.ct) || a.n)}</td>
     <td class="num">${fmt(a.oss.size)}</td>
     <td>${a.ult || '—'}</td>
   </tr>`).join('');
-  const shown = Math.min(resLimite, items.length);
+  const shown = Math.min(L.lim, items.length);
   el.innerHTML = `<div class="det-h">
       <h3 style="font-size:.9rem">${titulo}</h3>
       <span class="tg tg-bl">${fmt(items.length)} cuentas</span>
       <span class="per-n">${fmt(nRep)} reportes · clic en una cuenta para ver sus reportes</span>
-      <button class="btn btn-sm btn-outline" style="margin-left:auto" onclick="resSel = null; renderResumen()">Cerrar</button>
+      <button class="btn btn-sm btn-outline" style="margin-left:auto" onclick="cerrarLista('${p}')">Cerrar</button>
     </div>
     ${items.length ? `<div class="scroll-x"><table class="dt">
-      <thead><tr><th>Cuenta</th><th>Cluster</th><th class="num">${tipo === 'est' ? 'En este estatus' : 'Con este resultado'}</th><th class="num">Reportes totales</th><th class="num">OS generadas</th><th>Último reporte</th></tr></thead>
+      <thead><tr><th>Cuenta</th><th>Cluster</th><th class="num">${F.col}</th><th class="num">Reportes totales</th><th class="num">OS generadas</th><th>Último reporte</th></tr></thead>
       <tbody>${rows}</tbody></table></div>` : '<div class="empty-state">Sin cuentas en el periodo seleccionado.</div>'}
-    ${items.length > shown ? `<div style="text-align:center;margin-top:10px;font-size:.72rem;color:var(--tx2)">Mostrando ${fmt(shown)} de ${fmt(items.length)} · <button class="btn btn-sm btn-outline" onclick="renderResLista(true)">Mostrar 200 más</button></div>` : ''}`;
+    ${items.length > shown ? `<div style="text-align:center;margin-top:10px;font-size:.72rem;color:var(--tx2)">Mostrando ${fmt(shown)} de ${fmt(items.length)} · <button class="btn btn-sm btn-outline" onclick="renderLista('${p}', true)">Mostrar 200 más</button></div>` : ''}`;
 }
 
-document.getElementById('resLista').addEventListener('click', e => {
+Object.values(LISTAS).forEach(L => document.getElementById(L.el).addEventListener('click', e => {
   const tr = e.target.closest('tr[data-ct]');
   if (tr) verCuenta(tr.dataset.ct);
-});
+}));
 
 let ctLimite = 200;     // Filas visibles en Cuentas
 
@@ -908,7 +959,25 @@ function renderClusters() {
 }
 
 function renderFallas() {
-  barChart('fallasD', V.fallas, 'var(--or)');
+  const el = document.getElementById('faAm');
+  const am = V.fallas_am;
+  if (!am) {
+    el.innerHTML = `<div class="empty-state">${isLive ? 'Falta actualizar el Apps Script para ver las fallas de cierre.' : 'Disponible con datos en vivo.'}</div>`;
+  } else {
+    const entries = Object.entries(am);
+    const max = Math.max(...entries.map(x => x[1]), 1);
+    const sel = selDe('fallas', 'am');
+    const tCt = V.cuentas_con_os, tOs = Object.values(V.fallas_am_os).reduce((s, v) => s + v, 0);
+    el.innerHTML = `<table class="dt">
+      <thead><tr><th>Falla (col. AM)</th><th class="num">Cuentas</th><th class="num">OS</th><th></th></tr></thead>
+      <tbody>${entries.map(([k, v]) => `<tr class="clk${k === sel ? ' sel' : ''}" data-k="${attr(k)}" title="Ver cuentas">
+        <td>${k}</td><td class="num"><strong>${fmt(v)}</strong></td><td class="num">${fmt(V.fallas_am_os[k])}</td>
+        <td><div class="bar-fw" style="width:180px"><div class="bar-f" style="width:${v / max * 100}%;background:var(--or)"></div></div></td>
+      </tr>`).join('')}</tbody></table>
+      <div class="rep-n">${fmt(tCt)} cuentas con OS · si una cuenta tuvo varias fallas, aparece en cada una. "Sin cierre" = OS sin fila en CIERRE OS.</div>`;
+  }
+  barChart('fallasD', V.fallas, 'var(--or)', 0, !V.sinCasos, selDe('fallas', 'n2'));
+  renderLista('fallas');
 }
 
 function renderTecnicos() {
