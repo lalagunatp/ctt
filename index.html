@@ -698,14 +698,18 @@ function renderLista(p, mas) {
   L.lim = mas ? L.lim + 200 : 200;
   el.style.display = '';
 
+  // Falla N2 con cierres: primero el desglose por falla de cierre (col. AM)
+  const { tipo, k, am } = L.sel;
+  if (tipo === 'n2' && D.cierres && !am) return renderDesglose(p);
+
   // Casos del periodo que caen en la barra elegida, agrupados por cuenta
-  const { tipo, k } = L.sel;
   const F = FILTROS[tipo];
   const ctas = new Map();
   let nRep = 0;
   for (const c of D.casos) {
     if (V.desde && !((c[0] || '') >= V.desde)) continue;
     if (!F.f(c, k)) continue;
+    if (am && !fallasDeCaso(c).includes(am)) continue;
     const ct = String(c[1] == null ? '' : c[1]).trim();
     if (!ct) continue;
     nRep++;
@@ -718,7 +722,7 @@ function renderLista(p, mas) {
   const tot = new Map((V.cuentas || []).map(a => [a.ct, a.n]));
   const items = [...ctas.values()].sort((a, b) => b.n - a.n || b.ult.localeCompare(a.ult));
 
-  const titulo = F.t + ': ' + k;
+  const titulo = F.t + ': ' + k + (am ? ' › ' + am : '');
   const rows = items.slice(0, L.lim).map(a => `<tr class="clk" data-ct="${attr(a.ct)}">
     <td>${a.ct}</td><td>${a.cl || '—'}</td>
     <td class="num"><strong>${fmt(a.n)}</strong></td>
@@ -728,18 +732,71 @@ function renderLista(p, mas) {
   </tr>`).join('');
   const shown = Math.min(L.lim, items.length);
   el.innerHTML = `<div class="det-h">
+      ${am ? `<button class="btn btn-sm btn-outline" onclick="selAm('${p}', null)">← Fallas de cierre</button>` : ''}
       <h3 style="font-size:.9rem">${titulo}</h3>
       <span class="tg tg-bl">${fmt(items.length)} cuentas</span>
       <span class="per-n">${fmt(nRep)} reportes · clic en una cuenta para ver sus reportes</span>
       <button class="btn btn-sm btn-outline" style="margin-left:auto" onclick="cerrarLista('${p}')">Cerrar</button>
     </div>
     ${items.length ? `<div class="scroll-x"><table class="dt">
-      <thead><tr><th>Cuenta</th><th>Cluster</th><th class="num">${F.col}</th><th class="num">Reportes totales</th><th class="num">OS generadas</th><th>Último reporte</th></tr></thead>
+      <thead><tr><th>Cuenta</th><th>Cluster</th><th class="num">${am ? 'Reportes' : F.col}</th><th class="num">Reportes totales</th><th class="num">OS generadas</th><th>Último reporte</th></tr></thead>
       <tbody>${rows}</tbody></table></div>` : '<div class="empty-state">Sin cuentas en el periodo seleccionado.</div>'}
     ${items.length > shown ? `<div style="text-align:center;margin-top:10px;font-size:.72rem;color:var(--tx2)">Mostrando ${fmt(shown)} de ${fmt(items.length)} · <button class="btn btn-sm btn-outline" onclick="renderLista('${p}', true)">Mostrar 200 más</button></div>` : ''}`;
 }
 
-Object.values(LISTAS).forEach(L => document.getElementById(L.el).addEventListener('click', e => {
+// Falla de cierre de un caso; los casos sin OS van en "Sin OS"
+function fallasDeCaso(c) {
+  return c[3] ? fallasCierre(c[3]) : ['Sin OS'];
+}
+
+// Desglose de una falla N2 por falla de cierre (col. AM): cuentas, OS y reportes
+function renderDesglose(p) {
+  const L = LISTAS[p];
+  const k = L.sel.k;
+  const g = {}, ctsN2 = new Set();
+  let nRep = 0;
+  for (const c of D.casos) {
+    if (V.desde && !((c[0] || '') >= V.desde)) continue;
+    if (c[5] !== k) continue;
+    const ct = String(c[1] == null ? '' : c[1]).trim();
+    if (!ct) continue;
+    nRep++;
+    ctsN2.add(ct);
+    for (const f of fallasDeCaso(c)) {
+      const x = g[f] || (g[f] = { cts: new Set(), oss: new Set(), n: 0 });
+      x.cts.add(ct);
+      x.n++;
+      if (c[3]) x.oss.add(c[3]);
+    }
+  }
+  const entries = Object.entries(g).sort((a, b) => b[1].cts.size - a[1].cts.size);
+  const max = Math.max(...entries.map(([, x]) => x.cts.size), 1);
+  const rows = entries.map(([f, x]) => `<tr class="clk" data-am="${attr(f)}" title="Ver cuentas">
+    <td>${f}</td><td class="num"><strong>${fmt(x.cts.size)}</strong></td><td class="num">${fmt(x.oss.size)}</td><td class="num">${fmt(x.n)}</td>
+    <td><div class="bar-fw" style="width:160px"><div class="bar-f" style="width:${x.cts.size / max * 100}%;background:var(--or)"></div></div></td>
+  </tr>`).join('');
+  document.getElementById(L.el).innerHTML = `<div class="det-h">
+      <h3 style="font-size:.9rem">Falla N2: ${k}</h3>
+      <span class="tg tg-bl">${fmt(ctsN2.size)} cuentas</span>
+      <span class="per-n">${fmt(nRep)} reportes · clic en una falla de cierre para ver sus cuentas</span>
+      <button class="btn btn-sm btn-outline" style="margin-left:auto" onclick="cerrarLista('${p}')">Cerrar</button>
+    </div>
+    ${entries.length ? `<div class="scroll-x"><table class="dt">
+      <thead><tr><th>Falla de cierre (col. AM)</th><th class="num">Cuentas</th><th class="num">OS</th><th class="num">Reportes</th><th></th></tr></thead>
+      <tbody>${rows}</tbody></table></div>
+      <div class="rep-n">Si una cuenta tuvo varias fallas de cierre, aparece en cada una. "Sin cierre" = OS sin fila en CIERRE OS; "Sin OS" = reporte sin OS generada.</div>`
+      : '<div class="empty-state">Sin cuentas en el periodo seleccionado.</div>'}`;
+}
+
+function selAm(p, am) {
+  LISTAS[p].sel.am = am;
+  renderLista(p);
+  document.getElementById(LISTAS[p].el).scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+Object.entries(LISTAS).forEach(([p, L]) => document.getElementById(L.el).addEventListener('click', e => {
+  const am = e.target.closest('tr[data-am]');
+  if (am) return selAm(p, am.dataset.am);
   const tr = e.target.closest('tr[data-ct]');
   if (tr) verCuenta(tr.dataset.ct);
 }));
