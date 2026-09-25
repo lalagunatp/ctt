@@ -329,7 +329,8 @@ table.dt tr.sel td{background:var(--sf2)}
       </div>
     </div>
 
-    <!-- SUBIR DATOS (solo Gerente de Servicio y Gerente de Operaciones) -->
+    <!-- SUBIR DATOS (Gerente de Servicio y Gerente de Operaciones: ambos archivos;
+         Supervisor de Planta Interna: solo CIERRE OS) -->
     <div class="pnl" id="subir">
       <div class="g2" style="margin-top:8px">
         <div class="card">
@@ -343,7 +344,7 @@ table.dt tr.sel td{background:var(--sf2)}
           <button class="btn" id="btnCierre">Subir a CIERRE OS</button>
           <div class="sub-aviso" id="avCierre" style="display:none"></div>
         </div>
-        <div class="card">
+        <div class="card" id="cardCtt">
           <div class="card-t">BD CTT</div>
           <p class="sub-desc">Lo del archivo <b>entra hasta arriba</b> y se borran los renglones viejos que tengan el mismo dato en la <b>columna B</b>. Lo demás no se toca.</p>
           <div class="sub-ult" id="ultCtt"></div>
@@ -551,9 +552,12 @@ async function abrirApp() {
   document.getElementById('acceso').style.display = 'none';
   document.getElementById('quienNombre').textContent = PERFIL.nombre + ' · ' + PERFIL.puesto;
   document.getElementById('quien').style.display = '';
-  document.getElementById('tabSubir').style.display = PERFIL.carga ? '' : 'none';
+  // carga = CIERRE OS y BD CTT; cargaCierre = al menos CIERRE OS (Supervisor de Planta Interna)
+  const subeCierre = !!(PERFIL.carga || PERFIL.cargaCierre);
+  document.getElementById('tabSubir').style.display = subeCierre ? '' : 'none';
+  document.getElementById('cardCtt').style.display = PERFIL.carga ? '' : 'none';
   document.getElementById('mainContent').style.display = 'block';
-  if (PERFIL.carga) cargarUltimasCargas();
+  if (subeCierre) cargarUltimasCargas();
   await cargarDatos();
 }
 

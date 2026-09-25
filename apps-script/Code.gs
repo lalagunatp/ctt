@@ -73,6 +73,11 @@ const PUESTOS_CARGA = [
   'GERENTE DE OPERACIONES'
 ];
 
+// y estos, además de los de arriba, pueden subir solo CIERRE OS
+const PUESTOS_CARGA_CIERRE = [
+  'SUPERVISOR DE PLANTA INTERNA'
+];
+
 const SESION_SEG  = 21600;                 // la sesión dura 6 horas
 const MAX_FALLOS  = 5;                      // intentos de PIN antes de bloquear
 const BLOQUEO_SEG = 900;                    // 15 minutos de bloqueo
@@ -101,6 +106,10 @@ function puestoPermitido_(puesto) {
 
 function puedeCargar_(perfil) {
   return !!perfil && puestoEn_(perfil.puesto, PUESTOS_CARGA);
+}
+
+function puedeCargarCierre_(perfil) {
+  return puedeCargar_(perfil) || (!!perfil && puestoEn_(perfil.puesto, PUESTOS_CARGA_CIERRE));
 }
 
 function login_(numero, pin) {
@@ -146,7 +155,8 @@ function login_(numero, pin) {
 
   const perfil = {
     numero: persona.numero, nombre: persona.nombre, puesto: persona.puesto,
-    carga: puestoEn_(persona.puesto, PUESTOS_CARGA)
+    carga: puestoEn_(persona.puesto, PUESTOS_CARGA),
+    cargaCierre: puestoEn_(persona.puesto, PUESTOS_CARGA) || puestoEn_(persona.puesto, PUESTOS_CARGA_CIERRE)
   };
   const token = Utilities.getUuid();
   cache.put('tok_' + token, JSON.stringify(perfil), SESION_SEG);
@@ -219,8 +229,9 @@ function doPost(e) {
       result = SIN_SESION;
     } else if (data.action === 'subirCierre' || data.action === 'subirCtt') {
       // verificación real del puesto: la página solo esconde la sección
-      if (!puedeCargar_(perfil)) {
-        result = { ok: false, error: 'Tu puesto no tiene permiso para subir archivos.' };
+      const permitido = data.action === 'subirCierre' ? puedeCargarCierre_(perfil) : puedeCargar_(perfil);
+      if (!permitido) {
+        result = { ok: false, error: 'Tu puesto no tiene permiso para subir este archivo.' };
       } else {
         const lock = LockService.getScriptLock();
         if (!lock.tryLock(30000)) {
