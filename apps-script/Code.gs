@@ -1,7 +1,8 @@
 // ============================================================
 // CTT LA LAGUNA — Apps Script (Web App API)
 // Pegar en: BASE LA LAGUNA 2026 → Extensiones → Apps Script
-// Desplegar como Web App (acceso: cualquiera)
+// Desplegar como Web App (acceso: cualquiera). Los datos solo salen
+// con un token de sesión: número de empleado + PIN de PLANTILLA.
 // ============================================================
 
 const SPREADSHEET_ID = '1Ph5T-m-Lkbdw1LBq-9wIIMW6C8bljOG1t5GfZQhNZ2o';
@@ -47,26 +48,132 @@ function fechaHora_(v) {
 }
 
 // ================================================================
-// doGet — Sirve datos al dashboard
+// ACCESO — número de empleado + PIN de la pestaña PLANTILLA
+// (el mismo PIN que se usa en informeseguimiento)
+// ================================================================
+const GID_PLANTILLA = 913334386;
+const COL_PL_NUMERO = 3;                    // Columna D = número de empleado
+const COL_PL_NOMBRE = 4;                    // Columna E = nombre
+const COL_PL_PUESTO = 5;                    // Columna F = puesto
+const COL_PL_PIN    = 27;                   // Columna AB = PIN
+
+// Solo estos puestos pueden entrar al dashboard
+const PUESTOS_ACCESO = [
+  'GERENTE DE SERVICIO',
+  'ESPECIALISTA DE CAMPAÑAS DE LEALTAD',
+  'ESPECIALISTA DE ATENCION A CLIENTES',
+  'GERENTE DE OPERACIONES',
+  'SUPERVISOR DE PLANTA INTERNA',
+  'DIRECTOR DISTRITAL'
+];
+
+const SESION_SEG  = 21600;                  // la sesión dura 6 horas
+const MAX_FALLOS  = 5;                      // intentos de PIN antes de bloquear
+const BLOQUEO_SEG = 900;                    // 15 minutos de bloqueo
+
+function normalizar_(s) {
+  return String(s || '').trim().toUpperCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/\s+/g, ' ');
+}
+
+function limpiarNum_(v) {
+  let s = String(v === null || v === undefined ? '' : v).trim();
+  if (/^\d+\.0+$/.test(s)) s = s.replace(/\.0+$/, '');
+  return s.toUpperCase();
+}
+
+function puestoPermitido_(puesto) {
+  const p = normalizar_(puesto);
+  if (!p) return false;
+  return PUESTOS_ACCESO.some(t => p.indexOf(normalizar_(t)) >= 0);
+}
+
+function login_(numero, pin) {
+  const num = limpiarNum_(numero);
+  const pinLimpio = String(pin || '').trim();
+  if (!num) return { ok: false, error: 'Captura tu número de empleado.' };
+  if (!pinLimpio) return { ok: false, error: 'Captura tu PIN.' };
+
+  const cache = CacheService.getScriptCache();
+  const claveFallos = 'fallos_' + num;
+  const fallos = Number(cache.get(claveFallos) || 0);
+  if (fallos >= MAX_FALLOS) {
+    return { ok: false, error: 'Demasiados intentos. Espera 15 minutos e intenta de nuevo.' };
+  }
+
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const hoja = ss.getSheets().find(h => h.getSheetId() === GID_PLANTILLA);
+  if (!hoja) return { ok: false, error: 'No se encontró la pestaña PLANTILLA.' };
+
+  const datos = hoja.getDataRange().getValues();
+  let persona = null;
+  for (let i = 1; i < datos.length; i++) {
+    if (limpiarNum_(datos[i][COL_PL_NUMERO]) === num) {
+      persona = {
+        numero: num,
+        nombre: String(datos[i][COL_PL_NOMBRE] || '').trim(),
+        puesto: String(datos[i][COL_PL_PUESTO] || '').trim(),
+        pin:    String(datos[i][COL_PL_PIN] || '').trim()
+      };
+      break;
+    }
+  }
+
+  if (!persona || !persona.pin || persona.pin !== pinLimpio) {
+    cache.put(claveFallos, String(fallos + 1), BLOQUEO_SEG);
+    return { ok: false, error: 'Número o PIN incorrectos.' };
+  }
+  cache.remove(claveFallos);
+
+  if (!puestoPermitido_(persona.puesto)) {
+    return { ok: false, error: 'Tu puesto (' + (persona.puesto || 'sin puesto') + ') no tiene acceso a este dashboard.' };
+  }
+
+  const perfil = { numero: persona.numero, nombre: persona.nombre, puesto: persona.puesto };
+  const token = Utilities.getUuid();
+  cache.put('tok_' + token, JSON.stringify(perfil), SESION_SEG);
+  return { ok: true, token: token, perfil: perfil };
+}
+
+// Devuelve el perfil de la sesión, o null si el token no sirve o ya expiró
+function perfilDe_(token) {
+  if (!token) return null;
+  const datos = CacheService.getScriptCache().get('tok_' + token);
+  return datos ? JSON.parse(datos) : null;
+}
+
+const SIN_SESION = { error: 'Tu sesión expiró. Vuelve a entrar.', expirado: true };
+
+// ================================================================
+// doGet — Sirve datos al dashboard (siempre con token de sesión)
 // ================================================================
 function doGet(e) {
-  const action = (e && e.parameter && e.parameter.action) || 'dashboard';
+  const p = (e && e.parameter) || {};
+  const action = p.action || 'dashboard';
   let result;
 
   try {
-    switch (action) {
-      case 'dashboard':
-        result = getDashboardData();
-        break;
-      case 'seguimiento':
-        result = getSeguimiento();
-        break;
-      case 'buscar':
-        const os = e.parameter.os || '';
-        result = buscarOS(os);
-        break;
-      default:
-        result = { error: 'Acción no válida' };
+    const perfil = perfilDe_(p.token);
+    if (!perfil) {
+      result = SIN_SESION;
+    } else {
+      switch (action) {
+        case 'validar':
+          result = { ok: true, perfil: perfil };
+          break;
+        case 'dashboard':
+          result = getDashboardData();
+          break;
+        case 'seguimiento':
+          result = getSeguimiento();
+          break;
+        case 'buscar':
+          result = buscarOS(p.os || '');
+          break;
+        default:
+          result = { error: 'Acción no válida' };
+      }
     }
   } catch (err) {
     result = { error: err.message };
@@ -78,13 +185,20 @@ function doGet(e) {
 }
 
 // ================================================================
-// doPost — Recibe registros de seguimiento desde el dashboard
+// doPost — Login y registros de seguimiento desde el dashboard
+// (el cuerpo es JSON; el PIN va aquí y no en la URL)
 // ================================================================
 function doPost(e) {
   let result;
   try {
     const data = JSON.parse(e.postData.contents);
-    result = registrarSeguimiento(data);
+    if (data.action === 'login') {
+      result = login_(data.numero, data.pin);
+    } else if (!perfilDe_(data.token)) {
+      result = SIN_SESION;
+    } else {
+      result = registrarSeguimiento(data);
+    }
   } catch (err) {
     result = { error: err.message };
   }
