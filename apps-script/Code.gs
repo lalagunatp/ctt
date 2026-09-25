@@ -67,7 +67,13 @@ const PUESTOS_ACCESO = [
   'DIRECTOR DISTRITAL'
 ];
 
-const SESION_SEG  = 21600;                  // la sesión dura 6 horas
+// De esos, solo estos pueden subir archivos a CIERRE OS y BD CTT
+const PUESTOS_CARGA = [
+  'GERENTE DE SERVICIO',
+  'GERENTE DE OPERACIONES'
+];
+
+const SESION_SEG  = 21600;                 // la sesión dura 6 horas
 const MAX_FALLOS  = 5;                      // intentos de PIN antes de bloquear
 const BLOQUEO_SEG = 900;                    // 15 minutos de bloqueo
 
@@ -83,10 +89,18 @@ function limpiarNum_(v) {
   return s.toUpperCase();
 }
 
-function puestoPermitido_(puesto) {
+function puestoEn_(puesto, lista) {
   const p = normalizar_(puesto);
   if (!p) return false;
-  return PUESTOS_ACCESO.some(t => p.indexOf(normalizar_(t)) >= 0);
+  return lista.some(t => p.indexOf(normalizar_(t)) >= 0);
+}
+
+function puestoPermitido_(puesto) {
+  return puestoEn_(puesto, PUESTOS_ACCESO);
+}
+
+function puedeCargar_(perfil) {
+  return !!perfil && puestoEn_(perfil.puesto, PUESTOS_CARGA);
 }
 
 function login_(numero, pin) {
@@ -130,7 +144,10 @@ function login_(numero, pin) {
     return { ok: false, error: 'Tu puesto (' + (persona.puesto || 'sin puesto') + ') no tiene acceso a este dashboard.' };
   }
 
-  const perfil = { numero: persona.numero, nombre: persona.nombre, puesto: persona.puesto };
+  const perfil = {
+    numero: persona.numero, nombre: persona.nombre, puesto: persona.puesto,
+    carga: puestoEn_(persona.puesto, PUESTOS_CARGA)
+  };
   const token = Utilities.getUuid();
   cache.put('tok_' + token, JSON.stringify(perfil), SESION_SEG);
   return { ok: true, token: token, perfil: perfil };
@@ -171,6 +188,9 @@ function doGet(e) {
         case 'buscar':
           result = buscarOS(p.os || '');
           break;
+        case 'ultimasCargas':
+          result = ultimasCargas_();
+          break;
         default:
           result = { error: 'Acción no válida' };
       }
@@ -192,10 +212,29 @@ function doPost(e) {
   let result;
   try {
     const data = JSON.parse(e.postData.contents);
+    const perfil = data.action === 'login' ? null : perfilDe_(data.token);
     if (data.action === 'login') {
       result = login_(data.numero, data.pin);
-    } else if (!perfilDe_(data.token)) {
+    } else if (!perfil) {
       result = SIN_SESION;
+    } else if (data.action === 'subirCierre' || data.action === 'subirCtt') {
+      // verificación real del puesto: la página solo esconde la sección
+      if (!puedeCargar_(perfil)) {
+        result = { ok: false, error: 'Tu puesto no tiene permiso para subir archivos.' };
+      } else {
+        const lock = LockService.getScriptLock();
+        if (!lock.tryLock(30000)) {
+          result = { ok: false, error: 'Otra persona está subiendo un archivo. Intenta en un minuto.' };
+        } else {
+          try {
+            result = data.action === 'subirCierre'
+              ? subirCierre_(perfil, data.filas)
+              : subirCtt_(perfil, data.filas);
+          } finally {
+            lock.releaseLock();
+          }
+        }
+      }
     } else {
       result = registrarSeguimiento(data);
     }
@@ -206,6 +245,149 @@ function doPost(e) {
   return ContentService
     .createTextOutput(JSON.stringify(result))
     .setMimeType(ContentService.MimeType.JSON);
+}
+
+// ================================================================
+// SUBIR ARCHIVOS — CIERRE OS (reemplazo completo) y BD CTT (entra
+// arriba y se borra lo viejo con la misma llave de la columna B)
+// ================================================================
+const COL_LLAVE_CTT = 1;                    // Columna B de BD CTT
+const BLOQUE_ESCRITURA = 5000;              // renglones por setValues
+
+// Deja todos los renglones del mismo ancho y quita los que vienen vacíos
+function prepararFilas_(filas) {
+  if (!Array.isArray(filas)) throw new Error('Los renglones no llegaron en un formato válido.');
+  const limpias = filas
+    .filter(f => Array.isArray(f) && f.some(v => String(v == null ? '' : v).trim() !== ''))
+    .map(f => f.map(v => (v == null ? '' : String(v))));
+  const ancho = limpias.reduce((m, f) => Math.max(m, f.length), 0);
+  limpias.forEach(f => { while (f.length < ancho) f.push(''); });
+  return { filas: limpias, ancho: ancho };
+}
+
+// Escribe desde la fila `desde` en bloques, para no toparse con los
+// límites de tiempo con archivos grandes. Los textos se interpretan como
+// si se pegaran a mano (fechas y números quedan como fechas y números).
+function escribirFilas_(hoja, desde, filas, ancho) {
+  for (let b = 0; b < filas.length; b += BLOQUE_ESCRITURA) {
+    const trozo = filas.slice(b, b + BLOQUE_ESCRITURA);
+    hoja.getRange(desde + b, 1, trozo.length, ancho).setValues(trozo);
+  }
+}
+
+function asegurarColumnas_(hoja, ancho) {
+  if (hoja.getMaxColumns() < ancho) {
+    hoja.insertColumnsAfter(hoja.getMaxColumns(), ancho - hoja.getMaxColumns());
+  }
+}
+
+function llaveCtt_(v) {
+  return limpiarNum_(v).replace(/[^0-9A-Z]/g, '');
+}
+
+// CIERRE OS: se borra todo lo que hay debajo del encabezado y queda lo del archivo
+function subirCierre_(perfil, filasIn) {
+  const p = prepararFilas_(filasIn);
+  if (!p.filas.length) return { ok: false, error: 'El archivo no trae renglones de datos.' };
+
+  const hoja = SpreadsheetApp.openById(SPREADSHEET_ID).getSheetByName(HOJA_CIERRE);
+  if (!hoja) return { ok: false, error: 'No se encontró la hoja ' + HOJA_CIERRE };
+
+  asegurarColumnas_(hoja, p.ancho);
+  const ultimaNecesaria = 1 + p.filas.length;
+  if (hoja.getMaxRows() < ultimaNecesaria) {
+    hoja.insertRowsAfter(hoja.getMaxRows(), ultimaNecesaria - hoja.getMaxRows());
+  }
+
+  const ultimaFila = hoja.getLastRow();
+  if (ultimaFila > 1) {
+    hoja.getRange(2, 1, ultimaFila - 1, Math.max(p.ancho, hoja.getLastColumn())).clearContent();
+  }
+  SpreadsheetApp.flush();
+
+  escribirFilas_(hoja, 2, p.filas, p.ancho);
+  registrarCarga_('cierre', perfil, p.filas.length);
+  return { ok: true, filas: p.filas.length, antes: Math.max(0, ultimaFila - 1) };
+}
+
+// BD CTT: lo del archivo entra hasta arriba (debajo del encabezado) y luego
+// se borran los renglones viejos con la misma llave (columna B). Lo que no
+// venga en el archivo no se toca ni se reescribe.
+function subirCtt_(perfil, filasIn) {
+  const p = prepararFilas_(filasIn);
+  if (!p.filas.length) return { ok: false, error: 'El archivo no trae renglones de datos.' };
+  if (p.ancho <= COL_LLAVE_CTT) return { ok: false, error: 'El archivo trae ' + p.ancho + ' columna(s); la llave va en la columna B.' };
+
+  const hoja = SpreadsheetApp.openById(SPREADSHEET_ID).getSheetByName(HOJA_CTT);
+  if (!hoja) return { ok: false, error: 'No se encontró la hoja ' + HOJA_CTT };
+
+  // 1) llaves del archivo; si una viene repetida en el mismo archivo se
+  //    queda la primera (la de más arriba)
+  const vistas = {};
+  const nuevas = [];
+  let repetidasArchivo = 0;
+  for (const f of p.filas) {
+    const k = llaveCtt_(f[COL_LLAVE_CTT]);
+    if (k) {
+      if (vistas[k]) { repetidasArchivo++; continue; }
+      vistas[k] = true;
+    }
+    nuevas.push(f);
+  }
+
+  // 2) renglones viejos que traen una llave del archivo (base 1)
+  const ultimaFila = hoja.getLastRow();
+  const borrar = [];
+  if (ultimaFila > 1) {
+    const llaves = hoja.getRange(2, COL_LLAVE_CTT + 1, ultimaFila - 1, 1).getValues();
+    for (let r = 0; r < llaves.length; r++) {
+      const k = llaveCtt_(llaves[r][0]);
+      if (k && vistas[k]) borrar.push(r + 2);
+    }
+  }
+
+  // 3) primero entra lo nuevo (si algo falla después, no se perdió nada)
+  asegurarColumnas_(hoja, p.ancho);
+  if (hoja.getMaxRows() >= 2) hoja.insertRowsBefore(2, nuevas.length);
+  else hoja.insertRowsAfter(1, nuevas.length);
+  escribirFilas_(hoja, 2, nuevas, p.ancho);
+  SpreadsheetApp.flush();
+
+  // 4) luego se borra lo viejo, que ahora está `nuevas.length` renglones más
+  //    abajo; de abajo hacia arriba y agrupando renglones contiguos
+  const corr = nuevas.length;
+  let i = borrar.length - 1;
+  while (i >= 0) {
+    let fin = borrar[i];
+    let ini = fin;
+    while (i > 0 && borrar[i - 1] === ini - 1) { i--; ini = borrar[i]; }
+    hoja.deleteRows(ini + corr, fin - ini + 1);
+    i--;
+  }
+
+  registrarCarga_('ctt', perfil, nuevas.length);
+  return {
+    ok: true,
+    agregados: nuevas.length,
+    eliminados: borrar.length,
+    repetidasArchivo: repetidasArchivo,
+    total: Math.max(0, ultimaFila - 1 - borrar.length) + nuevas.length
+  };
+}
+
+function registrarCarga_(clave, perfil, filas) {
+  PropertiesService.getScriptProperties().setProperty('carga_' + clave, JSON.stringify({
+    fecha: Utilities.formatDate(new Date(), 'America/Mexico_City', 'yyyy-MM-dd HH:mm'),
+    nombre: perfil.nombre,
+    puesto: perfil.puesto,
+    filas: filas
+  }));
+}
+
+function ultimasCargas_() {
+  const props = PropertiesService.getScriptProperties();
+  const leer = k => { const raw = props.getProperty('carga_' + k); return raw ? JSON.parse(raw) : null; };
+  return { ok: true, cierre: leer('cierre'), ctt: leer('ctt') };
 }
 
 // ================================================================

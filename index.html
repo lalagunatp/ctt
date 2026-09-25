@@ -133,6 +133,16 @@ table.dt tr.sel td{background:var(--sf2)}
 .acc-btn{width:100%;padding:9px 16px;font-size:.85rem}
 .acc-btn:disabled{opacity:.6;cursor:wait}
 .acc-aviso{min-height:1.2em;margin-top:10px;font-size:.76rem;color:var(--rd)}
+.sub-desc{font-size:.75rem;color:var(--tx2);margin-bottom:10px}
+.sub-desc b{color:var(--tx)}
+.sub-ult{font-size:.72rem;color:var(--tx2);margin-bottom:10px}
+.sub-fila{display:flex;flex-direction:column;gap:6px;margin-bottom:10px;font-size:.75rem}
+.sub-fila input[type=file]{max-width:100%;color:var(--tx2)}
+.sub-chk{display:flex;align-items:center;gap:6px;color:var(--tx2)}
+.sub-aviso{margin-top:10px;padding:8px 10px;border-radius:6px;font-size:.75rem;background:rgba(52,211,153,.12);color:var(--gn)}
+.sub-aviso.err{background:rgba(248,113,113,.12);color:var(--rd)}
+.sub-aviso.prog{background:var(--sf2);color:var(--tx2)}
+.btn:disabled{opacity:.6;cursor:wait}
 .rep-seg{display:flex;align-items:center;gap:6px 10px;flex-wrap:wrap;margin-top:8px;padding-top:8px;border-top:1px solid var(--bd);font-size:.74rem}
 </style>
 </head>
@@ -195,6 +205,7 @@ table.dt tr.sel td{background:var(--sf2)}
       <button class="tab" data-p="canceladas">Canceladas</button>
       <button class="tab" data-p="seguimiento">Seguimiento</button>
       <button class="tab" data-p="tendencia">Tendencia</button>
+      <button class="tab" data-p="subir" id="tabSubir" style="display:none">Subir datos</button>
     </div>
 
     <!-- RESUMEN -->
@@ -316,6 +327,35 @@ table.dt tr.sel td{background:var(--sf2)}
           <span id="trS"></span><span id="trE"></span>
         </div>
       </div>
+    </div>
+
+    <!-- SUBIR DATOS (solo Gerente de Servicio y Gerente de Operaciones) -->
+    <div class="pnl" id="subir">
+      <div class="g2" style="margin-top:8px">
+        <div class="card">
+          <div class="card-t">CIERRE OS</div>
+          <p class="sub-desc">Se <b>reemplaza toda la hoja</b>: se borra lo que hay debajo del encabezado y queda solo lo del archivo.</p>
+          <div class="sub-ult" id="ultCierre"></div>
+          <div class="sub-fila">
+            <input type="file" id="archCierre" accept=".csv,text/csv">
+            <label class="sub-chk"><input type="checkbox" id="encCierre" checked> El archivo trae encabezado</label>
+          </div>
+          <button class="btn" id="btnCierre">Subir a CIERRE OS</button>
+          <div class="sub-aviso" id="avCierre" style="display:none"></div>
+        </div>
+        <div class="card">
+          <div class="card-t">BD CTT</div>
+          <p class="sub-desc">Lo del archivo <b>entra hasta arriba</b> y se borran los renglones viejos que tengan el mismo dato en la <b>columna B</b>. Lo demás no se toca.</p>
+          <div class="sub-ult" id="ultCtt"></div>
+          <div class="sub-fila">
+            <input type="file" id="archCtt" accept=".csv,text/csv">
+            <label class="sub-chk"><input type="checkbox" id="encCtt" checked> El archivo trae encabezado</label>
+          </div>
+          <button class="btn" id="btnCtt">Subir a BD CTT</button>
+          <div class="sub-aviso" id="avCtt" style="display:none"></div>
+        </div>
+      </div>
+      <p class="sub-desc">Los archivos van en CSV con las mismas columnas y en el mismo orden que la hoja. Si lo tienes en Excel: Archivo → Guardar como → CSV.</p>
     </div>
   </div>
 </div>
@@ -470,6 +510,11 @@ function salir(msg) {
   segData = [];
   isLive = false;
   try { sessionStorage.removeItem('ctt_sesion'); } catch(e) {}
+  document.getElementById('tabSubir').style.display = 'none';
+  if (document.getElementById('subir').classList.contains('active')) {
+    document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x.dataset.p === 'resumen'));
+    document.querySelectorAll('.pnl').forEach(x => x.classList.toggle('active', x.id === 'resumen'));
+  }
   document.getElementById('connDot').className = 'conn-dot off';
   document.getElementById('connLabel').textContent = 'Sin conectar';
   mostrarAcceso(msg);
@@ -506,9 +551,15 @@ async function abrirApp() {
   document.getElementById('acceso').style.display = 'none';
   document.getElementById('quienNombre').textContent = PERFIL.nombre + ' · ' + PERFIL.puesto;
   document.getElementById('quien').style.display = '';
+  document.getElementById('tabSubir').style.display = PERFIL.carga ? '' : 'none';
+  document.getElementById('mainContent').style.display = 'block';
+  if (PERFIL.carga) cargarUltimasCargas();
+  await cargarDatos();
+}
+
+async function cargarDatos() {
   document.getElementById('connDot').className = 'conn-dot load';
   document.getElementById('connLabel').textContent = 'Conectando...';
-  document.getElementById('mainContent').style.display = 'block';
   try {
     const live = await api('dashboard');
     if (live.error) throw new Error(live.error);
@@ -531,6 +582,128 @@ document.getElementById('accEntrar').addEventListener('click', entrar);
 document.getElementById('accNumero').addEventListener('keydown', e => { if (e.key === 'Enter') document.getElementById('accPin').focus(); });
 document.getElementById('accPin').addEventListener('keydown', e => { if (e.key === 'Enter') entrar(); });
 document.getElementById('btnSalir').addEventListener('click', () => salir());
+
+// ============================================================
+// SUBIR DATOS — CIERRE OS y BD CTT (el Apps Script vuelve a
+// checar el puesto antes de escribir o borrar nada)
+// ============================================================
+
+// Excel en México a veces guarda el CSV en Windows-1252 en vez de UTF-8
+async function leerTexto(archivo) {
+  const buf = await archivo.arrayBuffer();
+  try { return new TextDecoder('utf-8', { fatal: true }).decode(buf); }
+  catch (e) { return new TextDecoder('windows-1252').decode(buf); }
+}
+
+// CSV con comillas (comas y saltos de línea adentro, "" escapada); detecta
+// si el separador es coma o punto y coma
+function parseCsv(texto) {
+  texto = texto.replace(/^﻿/, '');
+  const primera = texto.slice(0, texto.indexOf('\n') < 0 ? texto.length : texto.indexOf('\n'));
+  const sep = (primera.split(';').length > primera.split(',').length) ? ';' : ',';
+  const filas = [];
+  let fila = [], campo = '', enComillas = false;
+  for (let i = 0; i < texto.length; i++) {
+    const c = texto[i];
+    if (enComillas) {
+      if (c === '"') {
+        if (texto[i + 1] === '"') { campo += '"'; i++; }
+        else enComillas = false;
+      } else campo += c;
+    } else if (c === '"') enComillas = true;
+    else if (c === sep) { fila.push(campo); campo = ''; }
+    else if (c === '\r') { /* se ignora */ }
+    else if (c === '\n') { fila.push(campo); filas.push(fila); fila = []; campo = ''; }
+    else campo += c;
+  }
+  if (campo !== '' || fila.length) { fila.push(campo); filas.push(fila); }
+  return filas.filter(f => f.some(v => v.trim() !== ''));
+}
+
+function avisoSubir(id, clase, html) {
+  const a = document.getElementById(id);
+  a.style.display = '';
+  a.className = 'sub-aviso' + (clase ? ' ' + clase : '');
+  a.innerHTML = html;
+}
+
+async function leerArchivoSubir(inputId, encId, avisoId) {
+  const archivo = document.getElementById(inputId).files[0];
+  if (!archivo) { avisoSubir(avisoId, 'err', 'Elige primero un archivo .csv.'); return null; }
+  if (!/\.csv$/i.test(archivo.name)) { avisoSubir(avisoId, 'err', 'El archivo tiene que ser .csv. En Excel: Archivo → Guardar como → CSV.'); return null; }
+  let filas;
+  try { filas = parseCsv(await leerTexto(archivo)); }
+  catch (e) { avisoSubir(avisoId, 'err', 'No se pudo leer el archivo: ' + esc(e.message)); return null; }
+  if (document.getElementById(encId).checked) filas = filas.slice(1);
+  if (!filas.length) { avisoSubir(avisoId, 'err', 'El archivo no trae renglones de datos.'); return null; }
+  const ancho = filas.reduce((m, f) => Math.max(m, f.length), 0);
+  return { filas: filas, ancho: ancho, nombre: archivo.name };
+}
+
+async function enviarArchivo(action, a, btnId, avisoId, inputId) {
+  const cuerpo = JSON.stringify(a.filas);
+  if (cuerpo.length > 40000000) {
+    avisoSubir(avisoId, 'err', 'El archivo pesa demasiado (' + Math.round(cuerpo.length / 1048576) + ' MB) para subirlo de una vez.');
+    return null;
+  }
+  const btn = document.getElementById(btnId);
+  btn.disabled = true;
+  avisoSubir(avisoId, 'prog', 'Subiendo ' + fmt(a.filas.length) + ' renglón(es)… puede tardar un poco, no cierres la página.');
+  try {
+    const r = await apiPost({ action: action, token: TOKEN, filas: a.filas });
+    if (!r.ok) { avisoSubir(avisoId, 'err', 'No se pudo subir: ' + esc(r.error || 'el servidor no respondió ok')); return null; }
+    document.getElementById(inputId).value = '';
+    return r;
+  } catch (e) {
+    avisoSubir(avisoId, 'err', 'No se pudo subir: ' + esc(e.message));
+    return null;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function subirCierre() {
+  const a = await leerArchivoSubir('archCierre', 'encCierre', 'avCierre');
+  if (!a) return;
+  if (!confirm('Se va a BORRAR todo lo que hay hoy en CIERRE OS (debajo del encabezado) y quedarán los ' +
+      fmt(a.filas.length) + ' renglón(es) de "' + a.nombre + '" (' + a.ancho + ' columnas).\n\nNo se puede deshacer. ¿Continuar?')) return;
+  const r = await enviarArchivo('subirCierre', a, 'btnCierre', 'avCierre', 'archCierre');
+  if (!r) return;
+  avisoSubir('avCierre', '', 'Listo: CIERRE OS quedó con ' + fmt(r.filas) + ' renglón(es) (antes tenía ' + fmt(r.antes) + ').');
+  cargarUltimasCargas();
+  cargarDatos();
+}
+
+async function subirCtt() {
+  const a = await leerArchivoSubir('archCtt', 'encCtt', 'avCtt');
+  if (!a) return;
+  if (a.ancho < 2) { avisoSubir('avCtt', 'err', 'El archivo solo trae ' + a.ancho + ' columna; la llave va en la columna B.'); return; }
+  const llaves = new Set(a.filas.map(f => String(f[1] || '').trim()).filter(Boolean));
+  if (!llaves.size) { avisoSubir('avCtt', 'err', 'Ningún renglón trae dato en la columna B. Sin esa llave no hay cómo quitar duplicados; revisa que sea el archivo correcto.'); return; }
+  if (!confirm('Se van a AGREGAR ' + fmt(a.filas.length) + ' renglón(es) de "' + a.nombre + '" hasta arriba de BD CTT (' +
+      fmt(llaves.size) + ' valores distintos en la columna B, ' + a.ancho + ' columnas).\n\n' +
+      'Enseguida se BORRAN los renglones viejos con esos mismos valores en la columna B. El resto de la hoja no se toca.\n\nNo se puede deshacer. ¿Continuar?')) return;
+  const r = await enviarArchivo('subirCtt', a, 'btnCtt', 'avCtt', 'archCtt');
+  if (!r) return;
+  avisoSubir('avCtt', '', 'Listo: entraron ' + fmt(r.agregados) + ' renglón(es) arriba y se quitaron ' + fmt(r.eliminados) +
+    ' viejo(s) con la misma columna B' + (r.repetidasArchivo ? ' (' + fmt(r.repetidasArchivo) + ' venían repetidos en el archivo y se dejó el primero)' : '') +
+    '. BD CTT quedó con ' + fmt(r.total) + ' renglón(es).');
+  cargarUltimasCargas();
+  cargarDatos();
+}
+
+async function cargarUltimasCargas() {
+  try {
+    const r = await api('ultimasCargas');
+    if (!r.ok) return;
+    const txt = c => c ? 'Última carga: ' + esc(c.fecha) + ' · ' + esc(c.nombre) + ' · ' + fmt(c.filas) + ' renglón(es)' : 'Sin cargas registradas desde aquí.';
+    document.getElementById('ultCierre').innerHTML = txt(r.cierre);
+    document.getElementById('ultCtt').innerHTML = txt(r.ctt);
+  } catch (e) {}
+}
+
+document.getElementById('btnCierre').addEventListener('click', subirCierre);
+document.getElementById('btnCtt').addEventListener('click', subirCtt);
 
 // ============================================================
 // RENDER
@@ -1383,6 +1556,7 @@ function verSegOS(os) {
 // UTILS
 // ============================================================
 function fmt(n) { return (n || 0).toLocaleString('es-MX'); }
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 function attr(s) { return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;'); }
 
 function toast(msg, err) {
