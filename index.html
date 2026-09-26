@@ -273,8 +273,15 @@ table.dt tr.sel td{background:var(--sf2)}
     <!-- TECNICOS -->
     <div class="pnl" id="tecnicos">
       <div class="card" style="margin-top:8px">
-        <div class="card-t">Top 20 Técnicos por OS</div>
-        <div id="tecTbl"></div>
+        <div class="card-t">Técnicos · cuentas que volvieron a generar OS</div>
+        <div class="flt">
+          <select id="fltTecN2" style="max-width:260px"><option value="">Tipo de falla (N2): todas</option></select>
+          <select id="fltTecAm" style="max-width:260px"><option value="">Falla de cierre (AM): todas</option></select>
+          <input type="text" id="fltTecTxt" placeholder="Buscar técnico...">
+        </div>
+        <div class="mini" id="tecRes"></div>
+        <div class="scroll-x"><div id="tecTbl"></div></div>
+        <div class="rep-n">Se toma la última cuadrilla asignada a cada OS. Una cuenta "volvió" si después de esa OS generó otra OS distinta (cualquier falla). Los filtros aplican a la OS que atendió el técnico. Toca un técnico para ver sus cuentas.</div>
       </div>
     </div>
 
@@ -824,7 +831,7 @@ function calcularVista() {
   V.fallas = ordenar(V.fallas);
   V.motivos = ordenar(V.motivos);
   V.proveedores = ordenar(V.proveedores);
-  V.tecnicos = ordenar(V.tecnicos, 20);
+  V.tecnicos = ordenar(V.tecnicos);
 
   const enPeriodo = a => !desde || (a.dt || '') >= desde;
   V.abiertos = (D.abiertos || []).filter(enPeriodo);
@@ -1304,14 +1311,122 @@ function renderFallas() {
   renderLista('fallas');
 }
 
-function renderTecnicos() {
-  const entries = Object.entries(V.tecnicos || {});
-  const max = entries.length ? entries[0][1] : 1;
-  const rows = entries.map(([name, count]) =>
-    `<tr><td>${name}</td><td>${fmt(count)}</td><td><div class="bar-fw" style="width:180px"><div class="bar-f" style="width:${count/max*100}%;background:var(--cy)"></div></div></td></tr>`
-  ).join('');
-  document.getElementById('tecTbl').innerHTML = `<table class="dt"><thead><tr><th>Técnico</th><th>OS</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+// Técnicos: por cada OS se toma su técnico (última cuadrilla) y el momento
+// del primer reporte CTT con esa OS. Una cuenta "volvió a generar OS" si
+// tiene otra OS distinta reportada después. Se cuentan cuentas únicas por
+// técnico; los filtros N2 / falla de cierre (AM) aplican a la OS atendida.
+let tecSel = '';
+
+function llenarSelect(id, valores, rotulo) {
+  const sel = document.getElementById(id);
+  const actual = sel.value;
+  sel.innerHTML = `<option value="">${rotulo}</option>` +
+    valores.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join('');
+  sel.value = valores.includes(actual) ? actual : '';
 }
+
+function renderTecnicos() {
+  const cont = document.getElementById('tecTbl');
+  if (V.sinCasos) {
+    document.getElementById('tecRes').innerHTML = '';
+    cont.innerHTML = '<div class="empty-state">Falta actualizar el Apps Script para ver este panel.</div>';
+    return;
+  }
+
+  // 1) OS únicas de toda la base (la siguiente OS puede caer fuera del periodo)
+  const oss = new Map();
+  for (const c of D.casos) {
+    const os = c[3], ct = String(c[1] == null ? '' : c[1]).trim();
+    if (!os || !ct) continue;
+    const t = (c[0] || '') + ' ' + (c[16] || '');
+    let o = oss.get(os);
+    if (!o) oss.set(os, o = { os, ct, t, dt: c[0] || '', tec: c[6] || '', n2: new Set() });
+    else if (t < o.t) { o.t = t; o.dt = c[0] || ''; }
+    if (c[5]) o.n2.add(c[5]);
+    if (!o.tec && c[6]) o.tec = c[6];
+  }
+  const porCuenta = new Map();
+  for (const o of oss.values()) (porCuenta.get(o.ct) || porCuenta.set(o.ct, []).get(o.ct)).push(o);
+
+  // siguiente OS de la misma cuenta, reportada después
+  const siguiente = o => {
+    let s = null;
+    for (const x of porCuenta.get(o.ct)) if (x.os !== o.os && x.t > o.t && (!s || x.t < s.t)) s = x;
+    return s;
+  };
+
+  // 2) opciones de los filtros (solo OS con técnico)
+  const conTec = [...oss.values()].filter(o => o.tec);
+  llenarSelect('fltTecN2', [...new Set(conTec.flatMap(o => [...o.n2]))].sort(), 'Tipo de falla (N2): todas');
+  const fN2 = document.getElementById('fltTecN2').value;
+  const amSel = document.getElementById('fltTecAm');
+  amSel.style.display = D.cierres ? '' : 'none';
+  if (D.cierres) {
+    const base = conTec.filter(o => !fN2 || o.n2.has(fN2));
+    llenarSelect('fltTecAm', [...new Set(base.flatMap(o => fallasCierre(o.os)))].sort(), 'Falla de cierre (AM): todas');
+  }
+  const fAm = D.cierres ? amSel.value : '';
+  const fTxt = document.getElementById('fltTecTxt').value.trim().toLowerCase();
+
+  // 3) por técnico: cuentas atendidas y cuentas que volvieron
+  const tecs = new Map();
+  for (const o of conTec) {
+    if (V.desde && !(o.dt >= V.desde)) continue;
+    if (fN2 && !o.n2.has(fN2)) continue;
+    if (fAm && !fallasCierre(o.os).includes(fAm)) continue;
+    let t = tecs.get(o.tec);
+    if (!t) tecs.set(o.tec, t = { tec: o.tec, cuentas: new Map(), volvieron: new Map() });
+    t.cuentas.set(o.ct, o);
+    const s = siguiente(o);
+    if (s && !t.volvieron.has(o.ct)) t.volvieron.set(o.ct, { o, s });
+  }
+
+  let lista = [...tecs.values()].map(t => ({
+    tec: t.tec, at: t.cuentas.size, vol: t.volvieron.size,
+    pct: t.cuentas.size ? t.volvieron.size / t.cuentas.size : 0, det: t.volvieron
+  })).sort((a, b) => b.vol - a.vol || b.pct - a.pct || a.tec.localeCompare(b.tec));
+
+  const totAt = lista.reduce((s, t) => s + t.at, 0), totVol = lista.reduce((s, t) => s + t.vol, 0);
+  document.getElementById('tecRes').innerHTML =
+    `<span><b>${fmt(lista.length)}</b> técnicos</span><span><b>${fmt(totAt)}</b> cuentas atendidas</span>` +
+    `<span><b>${fmt(totVol)}</b> volvieron a generar OS${totAt ? ` (${(totVol / totAt * 100).toFixed(1)}%)` : ''}</span>`;
+
+  if (fTxt) lista = lista.filter(t => t.tec.toLowerCase().includes(fTxt));
+  if (!lista.length) { cont.innerHTML = '<div class="empty-state">Sin técnicos con estos filtros.</div>'; return; }
+
+  const max = Math.max(1, ...lista.map(t => t.vol));
+  cont.innerHTML = `<table class="dt"><thead><tr><th>Técnico</th><th class="num">Volvieron a generar OS</th><th class="num">Cuentas atendidas</th><th class="num">%</th><th></th></tr></thead><tbody>` +
+    lista.map(t => {
+      const abierto = t.tec === tecSel;
+      let fila = `<tr class="clk${abierto ? ' sel' : ''}" data-tec="${esc(t.tec)}"><td title="${esc(t.tec)}">${esc(t.tec)}</td>` +
+        `<td class="num">${fmt(t.vol)}</td><td class="num">${fmt(t.at)}</td><td class="num">${(t.pct * 100).toFixed(1)}%</td>` +
+        `<td><div class="bar-fw" style="width:140px"><div class="bar-f" style="width:${t.vol / max * 100}%;background:var(--cy)"></div></div></td></tr>`;
+      if (abierto) {
+        const det = [...t.det.values()].sort((a, b) => (b.s.t > a.s.t ? 1 : -1));
+        fila += `<tr><td colspan="5" style="max-width:none;white-space:normal;background:var(--sf2)">` +
+          (det.length
+            ? `<table class="dt"><thead><tr><th>Cuenta</th><th>OS del técnico</th><th>Reporte</th><th>Siguiente OS</th><th>Reporte</th><th>Falla N2 siguiente</th></tr></thead><tbody>` +
+              det.map(({ o, s }) => `<tr class="clk" data-ct="${esc(o.ct)}"><td>${esc(o.ct)}</td><td>${esc(o.os)}</td><td>${esc(o.t.trim())}</td>` +
+                `<td>${esc(s.os)}</td><td>${esc(s.t.trim())}</td><td title="${esc([...s.n2].join(', '))}">${esc([...s.n2].join(', ') || '—')}</td></tr>`).join('') +
+              `</tbody></table>`
+            : `<div class="rep-n">Ninguna de sus cuentas volvió a generar OS.</div>`) +
+          `</td></tr>`;
+      }
+      return fila;
+    }).join('') + `</tbody></table>`;
+}
+
+document.getElementById('tecTbl').addEventListener('click', e => {
+  const ct = e.target.closest('tr[data-ct]');
+  if (ct) { location.hash = 'cuenta=' + encodeURIComponent(ct.dataset.ct); return; }
+  const tr = e.target.closest('tr[data-tec]');
+  if (!tr) return;
+  tecSel = tecSel === tr.dataset.tec ? '' : tr.dataset.tec;
+  renderTecnicos();
+});
+document.getElementById('fltTecN2').addEventListener('change', () => { if (V) renderTecnicos(); });
+document.getElementById('fltTecAm').addEventListener('change', () => { if (V) renderTecnicos(); });
+document.getElementById('fltTecTxt').addEventListener('input', () => { if (V) renderTecnicos(); });
 
 function renderAbiertos(filter, cluster) {
   const items = (V.abiertos || []).filter(a => {
