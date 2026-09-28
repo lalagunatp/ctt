@@ -443,7 +443,11 @@ function getDashboardData() {
   const iFechaAsig    = osHeaders.indexOf('FECHA ASIGNACION');
   const iFechaCompl   = osHeaders.indexOf('FECHA COMPLETA');
 
-  const iUsuario = colUsuarioTecnico_(osRows);
+  // Columna N "TECNICO" = usuario del técnico (SLKE3LAGT0241, CRCE3LAGT0047…);
+  // si un día cambia el encabezado, se busca por contenido
+  let iUsuario = osHeaders.indexOf('TECNICO');
+  const usuarioPorEncabezado = iUsuario >= 0;
+  if (!usuarioPorEncabezado) iUsuario = colUsuarioTecnico_(osRows);
 
   // Construir mapa OS → última asignación (última por fecha)
   const osMap = {};
@@ -455,7 +459,8 @@ function getDashboardData() {
     if (!osMap[os] || (fechaAsig && fechaAsig > osMap[os]._fecha)) {
       osMap[os] = {
         tec: String(row[iTecnico] || ''),
-        usr: iUsuario >= 0 ? usuarioTecnico_(row[iUsuario]) : usuarioTecnico_(row[iTecnico]),
+        usr: usuarioPorEncabezado ? String(row[iUsuario] || '').trim().toUpperCase()
+          : usuarioTecnico_(iUsuario >= 0 ? row[iUsuario] : row[iTecnico]),
         prov: String(row[iProveedor] || ''),
         ef: String(row[iEstatusFinal] || ''),
         motD: String(row[iMotDesasig] || ''),
@@ -583,7 +588,7 @@ function getDashboardData() {
   // [fecha, cuenta, estatus, OS, cluster, falla N2, técnico, proveedor,
   //  estatus BASE, motivo, con seguimiento (0/1),
   //  folio, N1, N3, fecha asignación OS, fecha completada OS, hora del reporte,
-  //  usuario del técnico (SKA…/CRC…/SLC…)]
+  //  usuario del técnico (col. TECNICO de OS POR INSTALAR)]
   stats.casos = records.map(r => [
     r.dt, r.ct, r.e, r.os, r.cl, r.n2, r.tec, r.prov, r.ef, r.mot, r.segN ? 1 : 0,
     r.f, r.n1, r.n3, r.fa, r.fc, r.hr, r.usr
@@ -598,17 +603,16 @@ function getDashboardData() {
 }
 
 // ================================================================
-// Usuario del técnico (SKA1234, CRC0456, SLC…). No se sabe en qué columna
-// de OS POR INSTALAR viene, así que se busca por contenido: la columna
-// con más valores que empiezan con uno de esos prefijos y un número.
-// Si viene pegado al nombre ("SKA1234 JUAN PÉREZ") también se saca.
+// Usuario del técnico (CRCE3LAGT0047 = Crece; SLKE3LAGT0241, SLC…, SOL…
+// = Soluciónika). Normalmente viene en la columna "TECNICO"; esto es el
+// respaldo por si cambia el encabezado: la columna con más códigos así.
 // ================================================================
-const PREFIJOS_USUARIO = ['SKA', 'CRC', 'SLC'];
-const RE_USUARIO = new RegExp('(?:^|[^A-Z0-9])((?:' + PREFIJOS_USUARIO.join('|') + ')[\\s_-]?\\d+)', 'i');
+const PREFIJOS_USUARIO = ['CRC', 'SLK', 'SLC', 'SOL'];
+const RE_USUARIO = new RegExp('(?:^|[^A-Z0-9])((?:' + PREFIJOS_USUARIO.join('|') + ')[A-Z0-9]*\\d[A-Z0-9]*)', 'i');
 
 function usuarioTecnico_(v) {
   const m = String(v == null ? '' : v).toUpperCase().match(RE_USUARIO);
-  return m ? m[1].replace(/[\s_-]/g, '') : '';
+  return m ? m[1] : '';
 }
 
 function colUsuarioTecnico_(rows) {
