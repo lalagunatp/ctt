@@ -4,6 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>CTT La Laguna — Seguimiento</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<meta name="theme-color" content="#0f1117">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
 :root{
@@ -154,6 +158,7 @@ table.dt tr.sel td{background:var(--sf2)}
   <header>
     <h1>CTT <span>La Laguna</span></h1>
     <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <button class="btn btn-sm btn-outline" id="btnInstalar" style="display:none" title="Instalar el dashboard como app en esta PC">Instalar app</button>
       <span class="badge" id="dateRange"></span>
       <div class="conn-status">
         <div class="conn-dot off" id="connDot"></div>
@@ -1715,6 +1720,31 @@ function toast(msg, err) {
 // Close modal on bg click
 document.getElementById('modalSeg').addEventListener('click', e => {
   if (e.target === e.currentTarget) cerrarModal();
+});
+
+// ============================================================
+// APP INSTALABLE — Chrome y Edge ofrecen instalarla en la PC;
+// el botón aparece solo cuando el navegador lo permite
+// ============================================================
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('sw.js').catch(() => {});
+}
+let avisoInstalar = null;
+window.addEventListener('beforeinstallprompt', e => {
+  e.preventDefault();
+  avisoInstalar = e;
+  document.getElementById('btnInstalar').style.display = '';
+});
+document.getElementById('btnInstalar').addEventListener('click', async () => {
+  if (!avisoInstalar) return;
+  avisoInstalar.prompt();
+  await avisoInstalar.userChoice;
+  avisoInstalar = null;
+  document.getElementById('btnInstalar').style.display = 'none';
+});
+window.addEventListener('appinstalled', () => {
+  document.getElementById('btnInstalar').style.display = 'none';
+  toast('Listo: la app quedó instalada en esta PC.');
 });
 
 // Al cargar: si ya hay sesión en esta pestaña se entra directo (el
