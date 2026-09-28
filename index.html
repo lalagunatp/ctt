@@ -104,6 +104,9 @@ table.dt tr:hover td{background:var(--sf2)}
 .per-btns button:hover:not(.active):not(:disabled){color:var(--tx)}
 .per-btns button:disabled{opacity:.4;cursor:not-allowed}
 .per-n{font-size:.7rem;color:var(--tx2)}
+.act{display:flex;gap:6px 16px;flex-wrap:wrap;align-items:baseline;margin-top:8px;padding:8px 12px;background:var(--sf);border:1px solid var(--bd);border-radius:8px;font-size:.72rem;color:var(--tx2)}
+.act b{color:var(--tx);font-weight:600}
+.act-i{white-space:normal}
 .mini{display:flex;flex-wrap:wrap;gap:4px 18px;margin-bottom:10px;font-size:.75rem;color:var(--tx2)}
 .mini b{font-weight:600;color:var(--tx)}
 table.dt .num{text-align:right}
@@ -191,6 +194,12 @@ table.dt tr.sel td{background:var(--sf2)}
         <button data-d="60">60 días</button>
       </div>
       <span class="per-n" id="periodoNota"></span>
+    </div>
+
+    <div class="act" id="actInfo" style="display:none">
+      <span class="per-l">Última actualización</span>
+      <span class="act-i" id="actCtt"></span>
+      <span class="act-i" id="actCierre"></span>
     </div>
 
     <div class="kpis" id="kpis"></div>
@@ -564,7 +573,7 @@ async function abrirApp() {
   document.getElementById('tabSubir').style.display = subeCierre ? '' : 'none';
   document.getElementById('cardCtt').style.display = PERFIL.carga ? '' : 'none';
   document.getElementById('mainContent').style.display = 'block';
-  if (subeCierre) cargarUltimasCargas();
+  cargarUltimasCargas();   // todos ven cuándo y quién actualizó
   await cargarDatos();
 }
 
@@ -710,7 +719,24 @@ async function cargarUltimasCargas() {
     const txt = c => c ? 'Última carga: ' + esc(c.fecha) + ' · ' + esc(c.nombre) + ' · ' + fmt(c.filas) + ' renglón(es)' : 'Sin cargas registradas desde aquí.';
     document.getElementById('ultCierre').innerHTML = txt(r.cierre);
     document.getElementById('ultCtt').innerHTML = txt(r.ctt);
+    // franja visible para todos, debajo del periodo
+    const linea = (hoja, c) => '<b>' + hoja + ':</b> ' + (c
+      ? esc(fechaCarga(c.fecha)) + ' · ' + esc(c.nombre) + (c.puesto ? ' (' + esc(c.puesto) + ')' : '')
+      : 'sin cargas registradas desde el dashboard');
+    document.getElementById('actCtt').innerHTML = linea('BD CTT', r.ctt);
+    document.getElementById('actCierre').innerHTML = linea('CIERRE OS', r.cierre);
+    document.getElementById('actInfo').style.display = '';
   } catch (e) {}
+}
+
+// '2026-09-28 14:05' → '28/09/2026 14:05 (hoy)'
+function fechaCarga(s) {
+  const m = String(s || '').match(/^(\d{4})-(\d{2})-(\d{2})(?: (\d{2}:\d{2}))?/);
+  if (!m) return s || '';
+  const hoy = new Date();
+  const dias = Math.round((new Date(hoy.getFullYear(), hoy.getMonth(), hoy.getDate()) - new Date(+m[1], +m[2] - 1, +m[3])) / 86400000);
+  const rel = dias === 0 ? ' (hoy)' : dias === 1 ? ' (ayer)' : dias > 1 ? ' (hace ' + dias + ' días)' : '';
+  return m[3] + '/' + m[2] + '/' + m[1] + (m[4] ? ' ' + m[4] : '') + rel;
 }
 
 document.getElementById('btnCierre').addEventListener('click', subirCierre);
