@@ -189,6 +189,13 @@ table.dt tr.sel td{background:var(--sf2)}
   </div>
 
   <div id="mainContent" style="display:none">
+    <!-- visible para todos los puestos, suban archivos o no -->
+    <div class="act" id="actInfo">
+      <span class="per-l">Última actualización de datos</span>
+      <span class="act-i" id="actCtt">Consultando…</span>
+      <span class="act-i" id="actCierre"></span>
+    </div>
+
     <div class="per">
       <span class="per-l">Periodo</span>
       <div class="per-btns" id="periodo">
@@ -199,12 +206,6 @@ table.dt tr.sel td{background:var(--sf2)}
         <button data-d="60">60 días</button>
       </div>
       <span class="per-n" id="periodoNota"></span>
-    </div>
-
-    <div class="act" id="actInfo" style="display:none">
-      <span class="per-l">Última actualización</span>
-      <span class="act-i" id="actCtt"></span>
-      <span class="act-i" id="actCierre"></span>
     </div>
 
     <div class="kpis" id="kpis"></div>
@@ -718,20 +719,26 @@ async function subirCtt() {
 }
 
 async function cargarUltimasCargas() {
+  const act = document.getElementById('actCtt');
   try {
     const r = await api('ultimasCargas');
-    if (!r.ok) return;
+    if (!r.ok) {
+      act.textContent = 'No se pudo consultar' + (r.error ? ': ' + r.error : '.');
+      document.getElementById('actCierre').textContent = '';
+      return;
+    }
     const txt = c => c ? 'Última carga: ' + esc(c.fecha) + ' · ' + esc(c.nombre) + ' · ' + fmt(c.filas) + ' renglón(es)' : 'Sin cargas registradas desde aquí.';
     document.getElementById('ultCierre').innerHTML = txt(r.cierre);
     document.getElementById('ultCtt').innerHTML = txt(r.ctt);
-    // franja visible para todos, debajo del periodo
+    // franja visible para todos, arriba del periodo
     const linea = (hoja, c) => '<b>' + hoja + ':</b> ' + (c
-      ? esc(fechaCarga(c.fecha)) + ' · ' + esc(c.nombre) + (c.puesto ? ' (' + esc(c.puesto) + ')' : '')
+      ? esc(fechaCarga(c.fecha)) + ' · actualizó ' + esc(c.nombre) + (c.puesto ? ' (' + esc(c.puesto) + ')' : '')
       : 'sin cargas registradas desde el dashboard');
-    document.getElementById('actCtt').innerHTML = linea('BD CTT', r.ctt);
+    act.innerHTML = linea('BD CTT', r.ctt);
     document.getElementById('actCierre').innerHTML = linea('CIERRE OS', r.cierre);
-    document.getElementById('actInfo').style.display = '';
-  } catch (e) {}
+  } catch (e) {
+    act.textContent = 'No se pudo consultar: ' + e.message;
+  }
 }
 
 // '2026-09-28 14:05' → '28/09/2026 14:05 (hoy)'
