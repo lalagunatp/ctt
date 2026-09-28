@@ -1356,17 +1356,21 @@ function renderFallas() {
 // técnico; los filtros N2 / falla de cierre (AM) aplican a la OS atendida.
 let tecSel = '';
 
-// Usuario del técnico: lo manda el Apps Script (casos[17]); si no, se
-// intenta sacar del nombre. El prefijo dice el proveedor.
-const PROV_USUARIO = { SKA: 'Soluciónika', CRC: 'Crece' };
+// Usuario del técnico: lo manda el Apps Script (casos[17], col. TECNICO de
+// OS POR INSTALAR). El proveedor sale del prefijo (CRC = Crece; SLK, SLC,
+// SOL = Soluciónika) y, si no hay usuario, de la columna PROVEEDOR (casos[7]).
 function usuarioTec(c) {
-  if (c[17]) return String(c[17]).toUpperCase();
-  const m = String(c[6] || '').toUpperCase().match(/(?:^|[^A-Z0-9])((?:SKA|CRC|SLC)[\s_-]?\d+)/);
-  return m ? m[1].replace(/[\s_-]/g, '') : '';
+  if (c[17]) return String(c[17]).trim().toUpperCase();
+  const m = String(c[6] || '').toUpperCase().match(/(?:^|[^A-Z0-9])((?:CRC|SLK|SLC|SOL)[A-Z0-9]*\d[A-Z0-9]*)/);
+  return m ? m[1] : '';
 }
-function provUsuario(usr) {
-  const p = (usr || '').slice(0, 3);
-  return !usr ? 'Sin usuario' : PROV_USUARIO[p] ? PROV_USUARIO[p] + ' (' + p + ')' : p;
+function provUsuario(usr, prov) {
+  const u = (usr || '').toUpperCase(), p = String(prov || '').toUpperCase();
+  if (u.startsWith('CRC')) return 'Crece';
+  if (/^(SLK|SLC|SOL)/.test(u)) return 'Soluciónika';
+  if (p.includes('SOLUCION')) return 'Soluciónika';
+  if (p.includes('CRCE') || p.includes('CRECE')) return 'Crece';
+  return p ? String(prov).trim() : 'Sin proveedor';
 }
 
 function llenarSelect(id, valores, rotulo) {
@@ -1392,10 +1396,10 @@ function renderTecnicos() {
     if (!os || !ct) continue;
     const t = (c[0] || '') + ' ' + (c[16] || '');
     let o = oss.get(os);
-    if (!o) oss.set(os, o = { os, ct, t, dt: c[0] || '', tec: c[6] || '', usr: usuarioTec(c), n2: new Set() });
+    if (!o) oss.set(os, o = { os, ct, t, dt: c[0] || '', tec: c[6] || '', usr: usuarioTec(c), prov: c[7] || '', n2: new Set() });
     else if (t < o.t) { o.t = t; o.dt = c[0] || ''; }
     if (c[5]) o.n2.add(c[5]);
-    if (!o.tec && c[6]) { o.tec = c[6]; o.usr = usuarioTec(c); }
+    if (!o.tec && c[6]) { o.tec = c[6]; o.usr = usuarioTec(c); o.prov = c[7] || ''; }
   }
   const porCuenta = new Map();
   for (const o of oss.values()) (porCuenta.get(o.ct) || porCuenta.set(o.ct, []).get(o.ct)).push(o);
@@ -1411,14 +1415,14 @@ function renderTecnicos() {
   const conTodos = [...oss.values()].filter(o => o.tec);
   // proveedor según el prefijo del usuario: Soluciónika y Crece primero
   const provSel = document.getElementById('fltTecProv');
-  const provs = [...new Set(conTodos.map(o => provUsuario(o.usr)))];
-  const orden = p => p.startsWith('Soluciónika') ? 0 : p.startsWith('Crece') ? 1 : p === 'Sin usuario' ? 3 : 2;
+  const provs = [...new Set(conTodos.map(o => provUsuario(o.usr, o.prov)))];
+  const orden = p => p === 'Soluciónika' ? 0 : p === 'Crece' ? 1 : p === 'Sin proveedor' ? 3 : 2;
   const provActual = provSel.value;
   provSel.innerHTML = '<option value="">Proveedor: todos</option>' +
     provs.sort((a, b) => orden(a) - orden(b) || a.localeCompare(b)).map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
   provSel.value = provs.includes(provActual) ? provActual : '';
   const fProv = provSel.value;
-  const conTec = conTodos.filter(o => !fProv || provUsuario(o.usr) === fProv);
+  const conTec = conTodos.filter(o => !fProv || provUsuario(o.usr, o.prov) === fProv);
 
   llenarSelect('fltTecN2', [...new Set(conTec.flatMap(o => [...o.n2]))].sort(), 'Tipo de falla (N2): todas');
   const fN2 = document.getElementById('fltTecN2').value;
@@ -1438,7 +1442,7 @@ function renderTecnicos() {
     if (fN2 && !o.n2.has(fN2)) continue;
     if (fAm && !fallasCierre(o.os).includes(fAm)) continue;
     let t = tecs.get(o.tec);
-    if (!t) tecs.set(o.tec, t = { tec: o.tec, usrs: {}, cuentas: new Map(), volvieron: new Map() });
+    if (!t) tecs.set(o.tec, t = { tec: o.tec, prov: o.prov, usrs: {}, cuentas: new Map(), volvieron: new Map() });
     if (o.usr) t.usrs[o.usr] = (t.usrs[o.usr] || 0) + 1;
     t.cuentas.set(o.ct, o);
     const s = siguiente(o);
@@ -1446,8 +1450,8 @@ function renderTecnicos() {
   }
 
   let lista = [...tecs.values()].map(t => ({
-    tec: t.tec,
-    usr: Object.entries(t.usrs).sort((a, b) => b[1] - a[1]).map(x => x[0])[0] || '',   // el más usado
+    tec: t.tec, prov: t.prov,
+    usr:Object.entries(t.usrs).sort((a, b) => b[1] - a[1]).map(x => x[0])[0] || '',   // el más usado
     at: t.cuentas.size, vol: t.volvieron.size,
     pct: t.cuentas.size ? t.volvieron.size / t.cuentas.size : 0, det: t.volvieron
   })).sort((a, b) => b.vol - a.vol || b.pct - a.pct || a.tec.localeCompare(b.tec));
@@ -1465,7 +1469,7 @@ function renderTecnicos() {
     lista.map(t => {
       const abierto = t.tec === tecSel;
       let fila = `<tr class="clk${abierto ? ' sel' : ''}" data-tec="${esc(t.tec)}"><td title="${esc(t.tec)}">${esc(t.tec)}</td>` +
-        `<td title="${esc(provUsuario(t.usr))}">${t.usr ? `<strong>${esc(t.usr)}</strong>` : '<span style="color:var(--tx2)">—</span>'}</td>` +
+        `<td title="${esc(provUsuario(t.usr, t.prov))}">${t.usr ? `<strong>${esc(t.usr)}</strong>` : '<span style="color:var(--tx2)">—</span>'}</td>` +
         `<td class="num">${fmt(t.vol)}</td><td class="num">${fmt(t.at)}</td><td class="num">${(t.pct * 100).toFixed(1)}%</td>` +
         `<td><div class="bar-fw" style="width:140px"><div class="bar-f" style="width:${t.vol / max * 100}%;background:var(--cy)"></div></div></td></tr>`;
       if (abierto) {
