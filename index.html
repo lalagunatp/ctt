@@ -290,9 +290,10 @@ table.dt tr.sel td{background:var(--sf2)}
       <div class="card" style="margin-top:8px">
         <div class="card-t">Técnicos · cuentas que volvieron a generar OS</div>
         <div class="flt">
+          <select id="fltTecProv"><option value="">Proveedor: todos</option></select>
           <select id="fltTecN2" style="max-width:260px"><option value="">Tipo de falla (N2): todas</option></select>
           <select id="fltTecAm" style="max-width:260px"><option value="">Falla de cierre (AM): todas</option></select>
-          <input type="text" id="fltTecTxt" placeholder="Buscar técnico...">
+          <input type="text" id="fltTecTxt" placeholder="Buscar técnico o usuario...">
         </div>
         <div class="mini" id="tecRes"></div>
         <div class="scroll-x"><div id="tecTbl"></div></div>
@@ -1355,6 +1356,19 @@ function renderFallas() {
 // técnico; los filtros N2 / falla de cierre (AM) aplican a la OS atendida.
 let tecSel = '';
 
+// Usuario del técnico: lo manda el Apps Script (casos[17]); si no, se
+// intenta sacar del nombre. El prefijo dice el proveedor.
+const PROV_USUARIO = { SKA: 'Soluciónika', CRC: 'Crece' };
+function usuarioTec(c) {
+  if (c[17]) return String(c[17]).toUpperCase();
+  const m = String(c[6] || '').toUpperCase().match(/(?:^|[^A-Z0-9])((?:SKA|CRC|SLC)[\s_-]?\d+)/);
+  return m ? m[1].replace(/[\s_-]/g, '') : '';
+}
+function provUsuario(usr) {
+  const p = (usr || '').slice(0, 3);
+  return !usr ? 'Sin usuario' : PROV_USUARIO[p] ? PROV_USUARIO[p] + ' (' + p + ')' : p;
+}
+
 function llenarSelect(id, valores, rotulo) {
   const sel = document.getElementById(id);
   const actual = sel.value;
@@ -1378,10 +1392,10 @@ function renderTecnicos() {
     if (!os || !ct) continue;
     const t = (c[0] || '') + ' ' + (c[16] || '');
     let o = oss.get(os);
-    if (!o) oss.set(os, o = { os, ct, t, dt: c[0] || '', tec: c[6] || '', n2: new Set() });
+    if (!o) oss.set(os, o = { os, ct, t, dt: c[0] || '', tec: c[6] || '', usr: usuarioTec(c), n2: new Set() });
     else if (t < o.t) { o.t = t; o.dt = c[0] || ''; }
     if (c[5]) o.n2.add(c[5]);
-    if (!o.tec && c[6]) o.tec = c[6];
+    if (!o.tec && c[6]) { o.tec = c[6]; o.usr = usuarioTec(c); }
   }
   const porCuenta = new Map();
   for (const o of oss.values()) (porCuenta.get(o.ct) || porCuenta.set(o.ct, []).get(o.ct)).push(o);
@@ -1394,7 +1408,18 @@ function renderTecnicos() {
   };
 
   // 2) opciones de los filtros (solo OS con técnico)
-  const conTec = [...oss.values()].filter(o => o.tec);
+  const conTodos = [...oss.values()].filter(o => o.tec);
+  // proveedor según el prefijo del usuario: Soluciónika y Crece primero
+  const provSel = document.getElementById('fltTecProv');
+  const provs = [...new Set(conTodos.map(o => provUsuario(o.usr)))];
+  const orden = p => p.startsWith('Soluciónika') ? 0 : p.startsWith('Crece') ? 1 : p === 'Sin usuario' ? 3 : 2;
+  const provActual = provSel.value;
+  provSel.innerHTML = '<option value="">Proveedor: todos</option>' +
+    provs.sort((a, b) => orden(a) - orden(b) || a.localeCompare(b)).map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
+  provSel.value = provs.includes(provActual) ? provActual : '';
+  const fProv = provSel.value;
+  const conTec = conTodos.filter(o => !fProv || provUsuario(o.usr) === fProv);
+
   llenarSelect('fltTecN2', [...new Set(conTec.flatMap(o => [...o.n2]))].sort(), 'Tipo de falla (N2): todas');
   const fN2 = document.getElementById('fltTecN2').value;
   const amSel = document.getElementById('fltTecAm');
@@ -1413,14 +1438,17 @@ function renderTecnicos() {
     if (fN2 && !o.n2.has(fN2)) continue;
     if (fAm && !fallasCierre(o.os).includes(fAm)) continue;
     let t = tecs.get(o.tec);
-    if (!t) tecs.set(o.tec, t = { tec: o.tec, cuentas: new Map(), volvieron: new Map() });
+    if (!t) tecs.set(o.tec, t = { tec: o.tec, usrs: {}, cuentas: new Map(), volvieron: new Map() });
+    if (o.usr) t.usrs[o.usr] = (t.usrs[o.usr] || 0) + 1;
     t.cuentas.set(o.ct, o);
     const s = siguiente(o);
     if (s && !t.volvieron.has(o.ct)) t.volvieron.set(o.ct, { o, s });
   }
 
   let lista = [...tecs.values()].map(t => ({
-    tec: t.tec, at: t.cuentas.size, vol: t.volvieron.size,
+    tec: t.tec,
+    usr: Object.entries(t.usrs).sort((a, b) => b[1] - a[1]).map(x => x[0])[0] || '',   // el más usado
+    at: t.cuentas.size, vol: t.volvieron.size,
     pct: t.cuentas.size ? t.volvieron.size / t.cuentas.size : 0, det: t.volvieron
   })).sort((a, b) => b.vol - a.vol || b.pct - a.pct || a.tec.localeCompare(b.tec));
 
@@ -1429,19 +1457,20 @@ function renderTecnicos() {
     `<span><b>${fmt(lista.length)}</b> técnicos</span><span><b>${fmt(totAt)}</b> cuentas atendidas</span>` +
     `<span><b>${fmt(totVol)}</b> volvieron a generar OS${totAt ? ` (${(totVol / totAt * 100).toFixed(1)}%)` : ''}</span>`;
 
-  if (fTxt) lista = lista.filter(t => t.tec.toLowerCase().includes(fTxt));
+  if (fTxt) lista = lista.filter(t => t.tec.toLowerCase().includes(fTxt) || t.usr.toLowerCase().includes(fTxt));
   if (!lista.length) { cont.innerHTML = '<div class="empty-state">Sin técnicos con estos filtros.</div>'; return; }
 
   const max = Math.max(1, ...lista.map(t => t.vol));
-  cont.innerHTML = `<table class="dt"><thead><tr><th>Técnico</th><th class="num">Volvieron a generar OS</th><th class="num">Cuentas atendidas</th><th class="num">%</th><th></th></tr></thead><tbody>` +
+  cont.innerHTML = `<table class="dt"><thead><tr><th>Técnico</th><th>Usuario</th><th class="num">Volvieron a generar OS</th><th class="num">Cuentas atendidas</th><th class="num">%</th><th></th></tr></thead><tbody>` +
     lista.map(t => {
       const abierto = t.tec === tecSel;
       let fila = `<tr class="clk${abierto ? ' sel' : ''}" data-tec="${esc(t.tec)}"><td title="${esc(t.tec)}">${esc(t.tec)}</td>` +
+        `<td title="${esc(provUsuario(t.usr))}">${t.usr ? `<strong>${esc(t.usr)}</strong>` : '<span style="color:var(--tx2)">—</span>'}</td>` +
         `<td class="num">${fmt(t.vol)}</td><td class="num">${fmt(t.at)}</td><td class="num">${(t.pct * 100).toFixed(1)}%</td>` +
         `<td><div class="bar-fw" style="width:140px"><div class="bar-f" style="width:${t.vol / max * 100}%;background:var(--cy)"></div></div></td></tr>`;
       if (abierto) {
         const det = [...t.det.values()].sort((a, b) => (b.s.t > a.s.t ? 1 : -1));
-        fila += `<tr><td colspan="5" style="max-width:none;white-space:normal;background:var(--sf2)">` +
+        fila += `<tr><td colspan="6"style="max-width:none;white-space:normal;background:var(--sf2)">` +
           (det.length
             ? `<table class="dt"><thead><tr><th>Cuenta</th><th>OS del técnico</th><th>Reporte</th><th>Siguiente OS</th><th>Reporte</th><th>Falla N2 siguiente</th></tr></thead><tbody>` +
               det.map(({ o, s }) => `<tr class="clk" data-ct="${esc(o.ct)}"><td>${esc(o.ct)}</td><td>${esc(o.os)}</td><td>${esc(o.t.trim())}</td>` +
@@ -1462,6 +1491,7 @@ document.getElementById('tecTbl').addEventListener('click', e => {
   tecSel = tecSel === tr.dataset.tec ? '' : tr.dataset.tec;
   renderTecnicos();
 });
+document.getElementById('fltTecProv').addEventListener('change', () => { if (V) renderTecnicos(); });
 document.getElementById('fltTecN2').addEventListener('change', () => { if (V) renderTecnicos(); });
 document.getElementById('fltTecAm').addEventListener('change', () => { if (V) renderTecnicos(); });
 document.getElementById('fltTecTxt').addEventListener('input', () => { if (V) renderTecnicos(); });

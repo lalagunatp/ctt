@@ -443,6 +443,8 @@ function getDashboardData() {
   const iFechaAsig    = osHeaders.indexOf('FECHA ASIGNACION');
   const iFechaCompl   = osHeaders.indexOf('FECHA COMPLETA');
 
+  const iUsuario = colUsuarioTecnico_(osRows);
+
   // Construir mapa OS → última asignación (última por fecha)
   const osMap = {};
   for (const row of osRows) {
@@ -453,6 +455,7 @@ function getDashboardData() {
     if (!osMap[os] || (fechaAsig && fechaAsig > osMap[os]._fecha)) {
       osMap[os] = {
         tec: String(row[iTecnico] || ''),
+        usr: iUsuario >= 0 ? usuarioTecnico_(row[iUsuario]) : usuarioTecnico_(row[iTecnico]),
         prov: String(row[iProveedor] || ''),
         ef: String(row[iEstatusFinal] || ''),
         motD: String(row[iMotDesasig] || ''),
@@ -533,6 +536,7 @@ function getDashboardData() {
       dt: fecha,
       hr: hora,
       tec: match ? match.tec : '',
+      usr: match ? match.usr : '',
       prov: match ? match.prov : '',
       ef: match ? match.ef : '',
       mot: mot,
@@ -578,10 +582,11 @@ function getDashboardData() {
   // periodo (7/15/30/60 días), contar cuentas únicas y el detalle por cuenta.
   // [fecha, cuenta, estatus, OS, cluster, falla N2, técnico, proveedor,
   //  estatus BASE, motivo, con seguimiento (0/1),
-  //  folio, N1, N3, fecha asignación OS, fecha completada OS, hora del reporte]
+  //  folio, N1, N3, fecha asignación OS, fecha completada OS, hora del reporte,
+  //  usuario del técnico (SKA…/CRC…/SLC…)]
   stats.casos = records.map(r => [
     r.dt, r.ct, r.e, r.os, r.cl, r.n2, r.tec, r.prov, r.ef, r.mot, r.segN ? 1 : 0,
-    r.f, r.n1, r.n3, r.fa, r.fc, r.hr
+    r.f, r.n1, r.n3, r.fa, r.fc, r.hr, r.usr
   ]);
 
   // 5. Cierres de OS (solo las OS que aparecen en BD CTT).
@@ -590,6 +595,33 @@ function getDashboardData() {
   stats.cierres = getCierres_(ss, new Set(records.map(r => r.os).filter(Boolean)));
 
   return stats;
+}
+
+// ================================================================
+// Usuario del técnico (SKA1234, CRC0456, SLC…). No se sabe en qué columna
+// de OS POR INSTALAR viene, así que se busca por contenido: la columna
+// con más valores que empiezan con uno de esos prefijos y un número.
+// Si viene pegado al nombre ("SKA1234 JUAN PÉREZ") también se saca.
+// ================================================================
+const PREFIJOS_USUARIO = ['SKA', 'CRC', 'SLC'];
+const RE_USUARIO = new RegExp('(?:^|[^A-Z0-9])((?:' + PREFIJOS_USUARIO.join('|') + ')[\\s_-]?\\d+)', 'i');
+
+function usuarioTecnico_(v) {
+  const m = String(v == null ? '' : v).toUpperCase().match(RE_USUARIO);
+  return m ? m[1].replace(/[\s_-]/g, '') : '';
+}
+
+function colUsuarioTecnico_(rows) {
+  const muestra = rows.slice(-3000);          // lo más reciente basta
+  const cuenta = {};
+  for (const row of muestra) {
+    for (let j = 0; j < row.length; j++) {
+      if (usuarioTecnico_(row[j])) cuenta[j] = (cuenta[j] || 0) + 1;
+    }
+  }
+  let mejor = -1, max = 0;
+  for (const j in cuenta) if (cuenta[j] > max) { max = cuenta[j]; mejor = +j; }
+  return mejor;
 }
 
 // ================================================================
