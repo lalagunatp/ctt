@@ -2,7 +2,9 @@
 // íconos para que abra aunque la red esté lenta; los datos (Apps Script,
 // otro dominio) nunca se guardan: siempre piden token y van directo.
 // Primero la red, así una versión nueva de la página llega en cuanto se publica.
-const CACHE = 'ctt-v1';
+// El dominio lalagunatp.github.io lo comparten otras apps (informeseguimiento):
+// solo se tocan los caches que empiezan con "ctt-".
+const CACHE = 'ctt-v2';
 const ARCHIVOS = ['./', 'index.html', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', e => {
@@ -11,7 +13,7 @@ self.addEventListener('install', e => {
 
 self.addEventListener('activate', e => {
   e.waitUntil(caches.keys()
-    .then(ks => Promise.all(ks.filter(k => k !== CACHE).map(k => caches.delete(k))))
+    .then(ks => Promise.all(ks.filter(k => k.startsWith('ctt-') && k !== CACHE).map(k => caches.delete(k))))
     .then(() => self.clients.claim()));
 });
 

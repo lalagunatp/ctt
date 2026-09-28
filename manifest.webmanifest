@@ -2,7 +2,7 @@
   "name": "CTT La Laguna — Seguimiento",
   "short_name": "CTT La Laguna",
   "description": "Dashboard de CTT La Laguna",
-  "id": "./",
+  "id": "/ctt/",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
