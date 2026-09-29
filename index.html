@@ -1435,23 +1435,29 @@ function renderTecnicos() {
   const fAm = D.cierres ? amSel.value : '';
   const fTxt = document.getElementById('fltTecTxt').value.trim().toLowerCase();
 
-  // 3) por técnico: cuentas atendidas y cuentas que volvieron
+  // 3) por técnico: se agrupa por USUARIO (una sola cuadrilla manda), no por
+  //    el nombre; así el mismo técnico escrito con distinta combinación de
+  //    mayúsculas/minúsculas no se duplica en dos renglones. Si la OS no trae
+  //    usuario, se agrupa por el nombre normalizado (mayúsculas) para tampoco
+  //    duplicarlo. El nombre que se muestra es la variante más usada.
   const tecs = new Map();
   for (const o of conTec) {
     if (V.desde && !(o.dt >= V.desde)) continue;
     if (fN2 && !o.n2.has(fN2)) continue;
     if (fAm && !fallasCierre(o.os).includes(fAm)) continue;
-    let t = tecs.get(o.tec);
-    if (!t) tecs.set(o.tec, t = { tec: o.tec, prov: o.prov, usrs: {}, cuentas: new Map(), volvieron: new Map() });
-    if (o.usr) t.usrs[o.usr] = (t.usrs[o.usr] || 0) + 1;
+    const key = o.usr ? 'U:' + o.usr : 'N:' + String(o.tec).trim().toUpperCase();
+    let t = tecs.get(key);
+    if (!t) tecs.set(key, t = { key, usr: o.usr, prov: o.prov, nombres: {}, cuentas: new Map(), volvieron: new Map() });
+    if (o.tec) t.nombres[o.tec] = (t.nombres[o.tec] || 0) + 1;
+    if (o.prov) t.prov = o.prov;
     t.cuentas.set(o.ct, o);
     const s = siguiente(o);
     if (s && !t.volvieron.has(o.ct)) t.volvieron.set(o.ct, { o, s });
   }
 
   let lista = [...tecs.values()].map(t => ({
-    tec: t.tec, prov: t.prov,
-    usr:Object.entries(t.usrs).sort((a, b) => b[1] - a[1]).map(x => x[0])[0] || '',   // el más usado
+    key: t.key, prov: t.prov, usr: t.usr,
+    tec: Object.entries(t.nombres).sort((a, b) => b[1] - a[1]).map(x => x[0])[0] || t.usr,   // nombre más usado
     at: t.cuentas.size, vol: t.volvieron.size,
     pct: t.cuentas.size ? t.volvieron.size / t.cuentas.size : 0, det: t.volvieron
   })).sort((a, b) => b.vol - a.vol || b.pct - a.pct || a.tec.localeCompare(b.tec));
@@ -1467,8 +1473,8 @@ function renderTecnicos() {
   const max = Math.max(1, ...lista.map(t => t.vol));
   cont.innerHTML = `<table class="dt"><thead><tr><th>Técnico</th><th>Usuario</th><th class="num">Volvieron a generar OS</th><th class="num">Cuentas atendidas</th><th class="num">%</th><th></th></tr></thead><tbody>` +
     lista.map(t => {
-      const abierto = t.tec === tecSel;
-      let fila = `<tr class="clk${abierto ? ' sel' : ''}" data-tec="${esc(t.tec)}"><td title="${esc(t.tec)}">${esc(t.tec)}</td>` +
+      const abierto = t.key === tecSel;
+      let fila = `<tr class="clk${abierto ? ' sel' : ''}" data-key="${esc(t.key)}"><td title="${esc(t.tec)}">${esc(t.tec)}</td>` +
         `<td title="${esc(provUsuario(t.usr, t.prov))}">${t.usr ? `<strong>${esc(t.usr)}</strong>` : '<span style="color:var(--tx2)">—</span>'}</td>` +
         `<td class="num">${fmt(t.vol)}</td><td class="num">${fmt(t.at)}</td><td class="num">${(t.pct * 100).toFixed(1)}%</td>` +
         `<td><div class="bar-fw" style="width:140px"><div class="bar-f" style="width:${t.vol / max * 100}%;background:var(--cy)"></div></div></td></tr>`;
@@ -1490,9 +1496,9 @@ function renderTecnicos() {
 document.getElementById('tecTbl').addEventListener('click', e => {
   const ct = e.target.closest('tr[data-ct]');
   if (ct) { location.hash = 'cuenta=' + encodeURIComponent(ct.dataset.ct); return; }
-  const tr = e.target.closest('tr[data-tec]');
+  const tr = e.target.closest('tr[data-key]');
   if (!tr) return;
-  tecSel = tecSel === tr.dataset.tec ? '' : tr.dataset.tec;
+  tecSel = tecSel === tr.dataset.key ? '' : tr.dataset.key;
   renderTecnicos();
 });
 document.getElementById('fltTecProv').addEventListener('change', () => { if (V) renderTecnicos(); });
