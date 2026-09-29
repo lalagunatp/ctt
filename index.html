@@ -1018,6 +1018,14 @@ function fallasCierre(os) {
   return [...new Set(cs.map(x => x[0] || 'Sin dato'))];
 }
 
+// Valor de una columna de CIERRE OS para una OS (únicos, no vacíos), en blanco
+// si aún no hay dato. i según COLS_CIERRE: 0 = Falla (AM), 2 = Solución (AO).
+function cierreCol(os, i) {
+  const cs = os && D.cierres && D.cierres[os];
+  if (!cs || !cs.length) return '';
+  return [...new Set(cs.map(x => String(x[i] || '').trim()).filter(Boolean))].join(' · ');
+}
+
 const FILTROS = {
   est: { t: 'Estatus CTT', col: 'En este estatus', f: (c, k) => (c[2] || 'Sin dato') === k },
   mot: { t: 'Resultado del cruce', col: 'Con este resultado', f: (c, k) => c[9] === k },
@@ -1544,9 +1552,16 @@ function renderTecnicos() {
         const det = [...t.det.values()].sort((a, b) => (b.s.t > a.s.t ? 1 : -1));
         fila += `<tr><td colspan="6"style="max-width:none;white-space:normal;background:var(--sf2)">` +
           (det.length
-            ? `<table class="dt"><thead><tr><th>Cuenta</th><th>OS del técnico</th><th>Reporte</th><th>Siguiente OS</th><th>Reporte</th><th>Falla N2 siguiente</th></tr></thead><tbody>` +
-              det.map(({ o, s }) => `<tr class="clk" data-ct="${esc(o.ct)}"><td>${esc(o.ct)}</td><td>${esc(o.os)}</td><td>${esc(o.t.trim())}</td>` +
-                `<td>${esc(s.os)}</td><td>${esc(s.t.trim())}</td><td title="${esc([...s.n2].join(', '))}">${esc([...s.n2].join(', ') || '—')}</td></tr>`).join('') +
+            ? `<table class="dt"><thead><tr><th>Cuenta</th><th>OS del técnico</th><th>Reporte</th><th>Solución</th><th>Siguiente OS</th><th>Reporte</th><th>Falla N2 siguiente</th><th>Falla</th></tr></thead><tbody>` +
+              det.map(({ o, s }) => {
+                const solTec = cierreCol(o.os, 2);      // Solución (AO) de la OS del técnico
+                const fallaSig = cierreCol(s.os, 0);    // Falla (AM) de la siguiente OS
+                return `<tr class="clk" data-ct="${esc(o.ct)}"><td>${esc(o.ct)}</td><td>${esc(o.os)}</td><td>${esc(o.t.trim())}</td>` +
+                `<td title="${esc(solTec)}">${esc(solTec || '—')}</td>` +
+                `<td>${esc(s.os)}</td><td>${esc(s.t.trim())}</td>` +
+                `<td title="${esc([...s.n2].join(', '))}">${esc([...s.n2].join(', ') || '—')}</td>` +
+                `<td title="${esc(fallaSig)}">${esc(fallaSig || '—')}</td></tr>`;
+              }).join('') +
               `</tbody></table>`
             : `<div class="rep-n">Ninguna de sus cuentas volvió a generar OS.</div>`) +
           `</td></tr>`;
