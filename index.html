@@ -493,25 +493,74 @@ function guardarSesion() {
   try { sessionStorage.setItem('ctt_sesion', JSON.stringify({ token: TOKEN, perfil: PERFIL })); } catch(e) {}
 }
 
-// GET con token; si la sesión expiró regresa al login
-async function api(action, params) {
-  const q = new URLSearchParams(Object.assign({ action: action, token: TOKEN }, params || {}));
-  const resp = await fetch(API_URL + '?' + q.toString());
-  const r = await resp.json();
-  if (r.expirado) { salir('Tu sesión expiró. Vuelve a entrar.'); throw new Error(r.error); }
-  return r;
+// Caché del último dashboard para pintar al instante al entrar y luego
+// refrescar en segundo plano. Se guarda en localStorage (persiste entre
+// aperturas de la app) atado al número de empleado; si el payload no cabe,
+// el try/catch lo ignora y solo se pierde la carga instantánea.
+function guardarCache() {
+  try {
+    if (D && PERFIL) localStorage.setItem('ctt_cache', JSON.stringify({ numero: PERFIL.numero, ts: Date.now(), D }));
+  } catch(e) {}
+}
+function cacheGuardado() {
+  try {
+    const c = JSON.parse(localStorage.getItem('ctt_cache') || 'null');
+    return (c && c.D && PERFIL && c.numero === PERFIL.numero) ? c : null;
+  } catch(e) { return null; }
+}
+function borrarCache() {
+  try { localStorage.removeItem('ctt_cache'); } catch(e) {}
 }
 
-// POST como text/plain para que el navegador no pida preflight (Apps Script no lo contesta)
-async function apiPost(body) {
-  const resp = await fetch(API_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-    body: JSON.stringify(body)
-  });
-  const r = await resp.json();
-  if (r.expirado) { salir('Tu sesión expiró. Vuelve a entrar.'); throw new Error(r.error); }
-  return r;
+const espera = ms => new Promise(r => setTimeout(r, ms));
+
+// GET con token y reintentos. Apps Script contesta el /exec con un redirect a
+// script.googleusercontent.com que a veces devuelve 404 intermitente; sin
+// reintento un solo tropiezo dejaba el dashboard "Sin datos". Se reintenta un
+// par de veces (salvo si la sesión expiró, que ya mandó al login).
+async function api(action, params) {
+  const q = new URLSearchParams(Object.assign({ action: action, token: TOKEN }, params || {}));
+  const url = API_URL + '?' + q.toString();
+  let err;
+  for (let i = 0; i < 3; i++) {
+    try {
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      const r = await resp.json();
+      if (r.expirado) { salir('Tu sesión expiró. Vuelve a entrar.'); throw new Error(r.error || 'expirado'); }
+      return r;
+    } catch (e) {
+      err = e;
+      if (!TOKEN) throw e;              // salir() ya limpió: no tiene caso reintentar
+      if (i < 2) await espera(300 * (i + 1));
+    }
+  }
+  throw err;
+}
+
+// POST como text/plain para que el navegador no pida preflight (Apps Script no
+// lo contesta). Solo se reintenta cuando quien llama lo pide (login, que es
+// de solo lectura); las subidas NO se reintentan para no escribir dos veces.
+async function apiPost(body, reintentar) {
+  const intentos = reintentar ? 3 : 1;
+  let err;
+  for (let i = 0; i < intentos; i++) {
+    try {
+      const resp = await fetch(API_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify(body)
+      });
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      const r = await resp.json();
+      if (r.expirado) { salir('Tu sesión expiró. Vuelve a entrar.'); throw new Error(r.error || 'expirado'); }
+      return r;
+    } catch (e) {
+      err = e;
+      if (i < intentos - 1) await espera(300 * (i + 1));
+    }
+  }
+  throw err;
 }
 
 function mostrarAcceso(msg) {
@@ -534,6 +583,7 @@ function salir(msg) {
   segData = [];
   isLive = false;
   try { sessionStorage.removeItem('ctt_sesion'); } catch(e) {}
+  borrarCache();
   document.getElementById('tabSubir').style.display = 'none';
   if (document.getElementById('subir').classList.contains('active')) {
     document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x.dataset.p === 'resumen'));
@@ -555,7 +605,7 @@ async function entrar() {
   document.getElementById('accEntrar').disabled = true;
   aviso.textContent = 'Validando…';
   try {
-    const r = await apiPost({ action: 'login', numero: numero, pin: pin });
+    const r = await apiPost({ action: 'login', numero: numero, pin: pin }, true);
     if (!r.ok || !r.token) {
       aviso.textContent = r.error || 'El servidor no reconoce el acceso con PIN (falta actualizar el Apps Script).';
       document.getElementById('accEntrar').disabled = false;
@@ -581,17 +631,27 @@ async function abrirApp() {
   document.getElementById('cardCtt').style.display = PERFIL.carga ? '' : 'none';
   document.getElementById('mainContent').style.display = 'block';
   cargarUltimasCargas();   // todos ven cuándo y quién actualizó
+  // Pinta al instante el último dashboard guardado (si hay) mientras llega
+  // el fresco: la app se ve de inmediato en vez de esperar toda la carga.
+  const c = cacheGuardado();
+  if (c) {
+    D = c.D;
+    try { render(); rutaCuenta(); } catch(e) {}
+    document.getElementById('connDot').className = 'conn-dot load';
+    document.getElementById('connLabel').textContent = 'Actualizando…';
+  }
   await cargarDatos();
 }
 
 async function cargarDatos() {
   document.getElementById('connDot').className = 'conn-dot load';
-  document.getElementById('connLabel').textContent = 'Conectando...';
+  if (!D) document.getElementById('connLabel').textContent = 'Conectando...';
   try {
     const live = await api('dashboard');
     if (live.error) throw new Error(live.error);
     D = live;
     isLive = true;
+    guardarCache();
     document.getElementById('connDot').className = 'conn-dot on';
     document.getElementById('connLabel').textContent = 'Conectado (live)';
     render();
@@ -600,7 +660,9 @@ async function cargarDatos() {
   } catch (err) {
     if (!TOKEN) return;   // la sesión expiró: ya se mostró el login
     document.getElementById('connDot').className = 'conn-dot off';
-    document.getElementById('connLabel').textContent = 'Sin datos (API no disponible)';
+    // Si ya se pintó lo guardado, se conserva en pantalla en vez de vaciarlo.
+    const conCache = isLive === false && D;
+    document.getElementById('connLabel').textContent = conCache ? 'Datos guardados (sin conexión)' : 'Sin datos (API no disponible)';
     toast('Error al conectar: ' + err.message, true);
   }
 }
