@@ -201,6 +201,9 @@ function doGet(e) {
         case 'validar':
           result = { ok: true, perfil: perfil };
           break;
+        case 'todo':
+          result = todo_();   // texto JSON ya armado (o de la caché)
+          break;
         case 'dashboard':
           result = getDashboardData();
           break;
@@ -228,8 +231,85 @@ function doGet(e) {
   }
 
   return ContentService
-    .createTextOutput(JSON.stringify(result))
+    .createTextOutput(typeof result === 'string' ? result : JSON.stringify(result))
     .setMimeType(ContentService.MimeType.JSON);
+}
+
+// ================================================================
+// todo_ — Todo lo que la página necesita al abrir, en una sola
+// respuesta: dashboard, seguimiento, planes y últimas cargas. Las hojas
+// se leen una vez y se comparten. El resultado se guarda comprimido en
+// la caché del script unos minutos: quien entre después lo recibe sin
+// volver a leer las hojas. Subir archivos o registrar un seguimiento
+// borra esa caché; lo pegado a mano en la hoja se ve al vencer.
+// ================================================================
+const CACHE_TODO_SEG = 600;                 // 10 minutos
+const CACHE_TODO_TROZO = 90000;             // la caché acepta hasta 100 KB por valor
+const CACHE_TODO_MAX = 200;                 // trozos (≈18 MB comprimidos) antes de no guardarlo
+
+function todo_() {
+  const guardado = leerCacheTodo_();
+  if (guardado) return guardado;
+
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const cttSheet = ss.getSheetByName(HOJA_CTT);
+  if (!cttSheet) return { error: 'No se encontró la hoja ' + HOJA_CTT };
+  const cttData = cttSheet.getDataRange().getValues();
+
+  const dash = getDashboardData(ss, cttData);
+  if (dash.error) return dash;
+  // Abiertos y canceladas van como índices a `casos` (antes se repetía
+  // el caso completo): la respuesta pesa bastante menos
+  delete dash.abiertos;
+  delete dash.canceladas_detail;
+
+  const F = fuentesClientes_(ss, true);
+  const json = JSON.stringify({
+    ok: true,
+    dashboard: dash,
+    seguimiento: getSeguimiento(ss, F),
+    planes: planesPorCuenta_(ss, cttData, F),
+    ultimasCargas: ultimasCargas_()
+  });
+  guardarCacheTodo_(json);
+  return json;
+}
+
+function guardarCacheTodo_(json) {
+  try {
+    const gz = Utilities.gzip(Utilities.newBlob(json, 'application/json'));
+    const b64 = Utilities.base64Encode(gz.getBytes());
+    const partes = {};
+    let n = 0;
+    for (let i = 0; i < b64.length; i += CACHE_TODO_TROZO) partes['todo_' + (n++)] = b64.slice(i, i + CACHE_TODO_TROZO);
+    if (n > CACHE_TODO_MAX) return;
+    partes.todo_n = String(n);
+    CacheService.getScriptCache().putAll(partes, CACHE_TODO_SEG);
+  } catch (e) { /* sin caché: la siguiente vuelve a leer las hojas */ }
+}
+
+function leerCacheTodo_() {
+  try {
+    const cache = CacheService.getScriptCache();
+    const n = Number(cache.get('todo_n') || 0);
+    if (!n) return null;
+    const claves = [];
+    for (let i = 0; i < n; i++) claves.push('todo_' + i);
+    const partes = cache.getAll(claves);
+    let b64 = '';
+    for (const k of claves) {
+      if (!partes[k]) return null;          // se perdió un trozo: se recalcula
+      b64 += partes[k];
+    }
+    const blob = Utilities.newBlob(Utilities.base64Decode(b64), 'application/x-gzip');
+    return Utilities.ungzip(blob).getDataAsString('UTF-8');
+  } catch (e) {
+    return null;
+  }
+}
+
+function borrarCacheTodo_() {
+  try { CacheService.getScriptCache().remove('todo_n'); } catch (e) {}
 }
 
 // ================================================================
@@ -267,6 +347,8 @@ function doPost(e) {
     } else {
       result = registrarSeguimiento(data, perfil);
     }
+    // cambió la hoja: que la siguiente carga lea todo de nuevo
+    if (data.action !== 'login' && result && result.ok) borrarCacheTodo_();
   } catch (err) {
     result = { error: err.message };
   }
@@ -422,13 +504,16 @@ function ultimasCargas_() {
 // ================================================================
 // getDashboardData — Lee CTT + OS y hace el cruce
 // ================================================================
-function getDashboardData() {
-  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+function getDashboardData(ssIn, cttDataIn) {
+  const ss = ssIn || SpreadsheetApp.openById(SPREADSHEET_ID);
 
-  // 1. Leer CTT
-  const cttSheet = ss.getSheetByName(HOJA_CTT);
-  if (!cttSheet) return { error: 'No se encontró la hoja ' + HOJA_CTT };
-  const cttData = cttSheet.getDataRange().getValues();
+  // 1. Leer CTT (todo_ ya la trae leída)
+  let cttData = cttDataIn;
+  if (!cttData) {
+    const cttSheet = ss.getSheetByName(HOJA_CTT);
+    if (!cttSheet) return { error: 'No se encontró la hoja ' + HOJA_CTT };
+    cttData = cttSheet.getDataRange().getValues();
+  }
   const cttHeaders = cttData[0];
   const cttRows = cttData.slice(1);
 
@@ -528,6 +613,9 @@ function getDashboardData() {
 
   const abiertos = [];
   const canceladas = [];
+  // Lo mismo pero como [índice en casos, resultado del seguimiento, núm. de registros]
+  const ab = [];
+  const cx = [];
 
   for (const row of cttRows) {
     const os = String(row[iOS_ctt] || '').trim();
@@ -574,6 +662,7 @@ function getDashboardData() {
       cr: creador(iCreado >= 0 ? row[iCreado] : '', iNumCreador >= 0 ? row[iNumCreador] : ''),
     };
 
+    const idx = records.length;
     records.push(rec);
     stats.total++;
     if (os) stats.con_os++;
@@ -586,8 +675,12 @@ function getDashboardData() {
     if (!['Cerrado','Cancelado'].includes(estatus)) {
       stats.total_abiertos++;
       abiertos.push(rec);
+      ab.push([idx, rec.seg, rec.segN]);
     }
-    if (match && match.ef === 'Cancelada') canceladas.push(rec);
+    if (match && match.ef === 'Cancelada') {
+      canceladas.push(rec);
+      cx.push([idx, rec.seg, rec.segN]);
+    }
 
     // Aggregations
     stats.estatus_ctt[estatus] = (stats.estatus_ctt[estatus] || 0) + 1;
@@ -605,6 +698,8 @@ function getDashboardData() {
 
   stats.abiertos = abiertos;
   stats.canceladas_detail = canceladas;
+  stats.ab = ab;
+  stats.cx = cx;
 
   // Una fila compacta por caso: el dashboard la usa para filtrar por
   // periodo (7/15/30/60 días), contar cuentas únicas y el detalle por cuenta.
@@ -729,8 +824,8 @@ function getCierres_(ss, osSet) {
 // ================================================================
 // getSeguimiento — Lee todos los registros de seguimiento
 // ================================================================
-function getSeguimiento() {
-  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+function getSeguimiento(ssIn, FIn) {
+  const ss = ssIn || SpreadsheetApp.openById(SPREADSHEET_ID);
   const sheet = ss.getSheetByName(HOJA_SEGUIMIENTO);
   if (!sheet || sheet.getLastRow() < 2) return { rows: [] };
 
@@ -748,7 +843,7 @@ function getSeguimiento() {
 
   // Cliente, plan y cluster al día (de las hojas de clientes). Lo capturado
   // se respeta, salvo un plan "No se especificó"; el cluster sale de BD CTT.
-  const F = fuentesClientes_(ss, true);
+  const F = FIn || fuentesClientes_(ss, true);
   const memo = {};
   rows.forEach(obj => {
     const k = limpiarNum_(obj.OS) + '|' + limpiarNum_(obj.CUENTA);
@@ -980,11 +1075,14 @@ function resolverCliente_(F, osIn, ctaIn) {
 // Plan de cada cuenta de BD CTT (pestaña Cuentas), con el mismo criterio
 // que el seguimiento, tomando la OS de su reporte más reciente.
 // Va comprimido: { lista: [planes distintos], ct: { cuenta: índice } }
-function planesPorCuenta_() {
-  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
-  const ctt = ss.getSheetByName(HOJA_CTT);
-  if (!ctt) return { error: 'No se encontró la hoja ' + HOJA_CTT };
-  const data = ctt.getDataRange().getValues();
+function planesPorCuenta_(ssIn, dataIn, FIn) {
+  const ss = ssIn || SpreadsheetApp.openById(SPREADSHEET_ID);
+  let data = dataIn;
+  if (!data) {
+    const ctt = ss.getSheetByName(HOJA_CTT);
+    if (!ctt) return { error: 'No se encontró la hoja ' + HOJA_CTT };
+    data = ctt.getDataRange().getValues();
+  }
   const iOS = colPorEncabezado_(data[0], ['OS']);
 
   const ult = {};   // cuenta → { k: 'fecha hora', os }
@@ -998,7 +1096,7 @@ function planesPorCuenta_() {
     if (!u || (os && (!u.os || k >= u.k)) || (!os && !u.os && k >= u.k)) ult[cuenta] = { k: k, os: os };
   }
 
-  const F = fuentesClientes_(ss, true);
+  const F = FIn || fuentesClientes_(ss, true);
   const lista = [], idx = {}, ct = {};
   for (const cuenta in ult) {
     const plan = resolverCliente_(F, ult[cuenta].os, cuenta).plan;
