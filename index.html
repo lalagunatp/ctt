@@ -1872,7 +1872,7 @@ function renderSeguimiento(filter, resultado) {
     <td>${g(s,'plan','PLAN')}</td>
     <td>${g(s,'cluster','CLUSTER')}</td>
     <td><span class="tg ${resTag(g(s,'resultado','RESULTADO'))}">${g(s,'resultado','RESULTADO')}</span></td>
-    <td>${g(s,'fecha_visita','FECHA_VISITA')}</td>
+    <td>${g(s,'fecha_visita','FECHA_VISITA').split(' ')[0]}</td>
     <td title="${g(s,'comentario','COMENTARIO')}">${(g(s,'comentario','COMENTARIO')).substring(0,50)}</td>
     <td>${g(s,'quien_reporta','QUIEN_REPORTA')}</td>
     <td>${g(s,'puesto','PUESTO')}</td>

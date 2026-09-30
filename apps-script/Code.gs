@@ -807,7 +807,8 @@ function unirRenglones_(a, b) {
 
 function planValido_(v) {
   const s = normalizar_(v).replace(/[^A-Z0-9]/g, '');
-  return !!s && s.indexOf('NOSEESPECIFIC') < 0 && s.indexOf('NOESPECIFIC') < 0;
+  // "No se especificó", "No especificado" y la variante escrita "espesifico"
+  return !!s && !/NO(SE)?ESPE[CS]IFIC/.test(s);
 }
 
 // Una fuente por hoja; cada una sabe dar sus renglones por OS y por cuenta.
