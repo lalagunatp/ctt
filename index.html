@@ -68,6 +68,8 @@ table.dt{width:100%;border-collapse:collapse;font-size:.73rem}
 table.dt th{background:var(--sf2);padding:7px 8px;text-align:left;font-weight:600;position:sticky;top:0;z-index:1;font-size:.68rem;text-transform:uppercase;letter-spacing:.03em;color:var(--tx2)}
 table.dt td{padding:6px 8px;border-bottom:1px solid var(--bd);max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 table.dt tr:hover td{background:var(--sf2)}
+table.dt th[data-s]{cursor:pointer;user-select:none;white-space:nowrap}
+table.dt th[data-s]:hover,table.dt th.ord{color:var(--ac)}
 .scroll-x{overflow-x:auto}
 .tg{display:inline-block;padding:2px 6px;border-radius:4px;font-size:.66rem;font-weight:500}
 .tg-gn{background:rgba(52,211,153,.15);color:var(--gn)}
@@ -249,13 +251,6 @@ table.dt tr.sel td{background:var(--sf2)}
             <option value="rep">Con 2+ reportes</option>
             <option value="ca">Con cancelados</option>
             <option value="ab">Con abiertos</option>
-          </select>
-          <select id="fltCtOrden">
-            <option value="n">Más reportes</option>
-            <option value="os">Más OS generadas</option>
-            <option value="ca">Más cancelados</option>
-            <option value="ab">Más abiertos</option>
-            <option value="ult">Reporte más reciente</option>
           </select>
         </div>
         <div class="scroll-x"><div id="ctTbl"></div></div>
@@ -1184,7 +1179,18 @@ Object.entries(LISTAS).forEach(([p, L]) => document.getElementById(L.el).addEven
   if (tr) verCuenta(tr.dataset.ct);
 }));
 
+// Orden por columna: clic en el encabezado = mayor a menor; otro clic = menor a mayor
+function thOrd(txt, k, ord, num) {
+  const on = ord.k === k;
+  return `<th class="${num ? 'num' : ''}${on ? ' ord' : ''}" data-s="${k}" title="Ordenar">${txt}${on ? (ord.asc ? ' ▲' : ' ▼') : ''}</th>`;
+}
+function cambiarOrd(ord, k) {
+  if (ord.k === k) ord.asc = !ord.asc;
+  else { ord.k = k; ord.asc = false; }
+}
+
 let ctLimite = 200;     // Filas visibles en Cuentas
+const ctOrd = { k: 'n', asc: false };
 
 function renderCuentas(mas) {
   ctLimite = mas ? ctLimite + 200 : 200;
@@ -1205,16 +1211,16 @@ function renderCuentas(mas) {
   const f = document.getElementById('fltCt').value.trim().toLowerCase();
   const cl = sel.value;
   const tipo = document.getElementById('fltCtTipo').value;
-  const orden = document.getElementById('fltCtOrden').value;
   const items = V.cuentas.filter(a =>
     (!f || a.ct.toLowerCase().includes(f) || a.cl.toLowerCase().includes(f)) &&
     (!cl || a.cl === cl) &&
     (!tipo || (tipo === 'rep' ? a.n > 1 : a[tipo] > 0))
   );
+  const k = ctOrd.k, dir = ctOrd.asc ? -1 : 1;
   const porFecha = (a, b) => b.ult.localeCompare(a.ult);
-  items.sort(orden === 'ult'
-    ? (a, b) => porFecha(a, b) || b.n - a.n
-    : (a, b) => b[orden] - a[orden] || b.n - a.n || porFecha(a, b));
+  items.sort(k === 'ult'
+    ? (a, b) => dir * porFecha(a, b) || b.n - a.n
+    : (a, b) => dir * (b[k] - a[k]) || b.n - a.n || porFecha(a, b));
 
   const t = { n: 0, os: 0, at: 0, ca: 0, ab: 0 };
   items.forEach(a => { t.n += a.n; t.os += a.os; t.at += a.at; t.ca += a.ca; t.ab += a.ab; });
@@ -1237,7 +1243,7 @@ function renderCuentas(mas) {
     <td>${a.ult || '—'}</td>
   </tr>`).join('');
   document.getElementById('ctTbl').innerHTML = `<table class="dt">
-    <thead><tr><th>Cuenta</th><th>Cluster</th><th class="num">Reportes</th><th class="num">OS generadas</th><th class="num">Atendidos</th><th class="num">Cancelados</th><th class="num">Abiertos</th><th>Último reporte</th></tr></thead>
+    <thead><tr><th>Cuenta</th><th>Cluster</th>${thOrd('Reportes', 'n', ctOrd, 1)}${thOrd('OS generadas', 'os', ctOrd, 1)}${thOrd('Atendidos', 'at', ctOrd, 1)}${thOrd('Cancelados', 'ca', ctOrd, 1)}${thOrd('Abiertos', 'ab', ctOrd, 1)}${thOrd('Último reporte', 'ult', ctOrd)}</tr></thead>
     <tbody>${rows}</tbody></table>`;
 
   const shown = Math.min(ctLimite, items.length);
@@ -1246,11 +1252,13 @@ function renderCuentas(mas) {
     : '';
 }
 
-['fltCt', 'fltCtCluster', 'fltCtTipo', 'fltCtOrden'].forEach(id =>
+['fltCt', 'fltCtCluster', 'fltCtTipo'].forEach(id =>
   document.getElementById(id).addEventListener(id === 'fltCt' ? 'input' : 'change', () => renderCuentas())
 );
 
 document.getElementById('ctTbl').addEventListener('click', e => {
+  const th = e.target.closest('th[data-s]');
+  if (th) { cambiarOrd(ctOrd, th.dataset.s); renderCuentas(); return; }
   const tr = e.target.closest('tr[data-ct]');
   if (tr) verCuenta(tr.dataset.ct);
 });
@@ -1425,6 +1433,7 @@ function renderFallas() {
 // tiene otra OS distinta reportada después. Se cuentan cuentas únicas por
 // técnico; los filtros N2 / falla de cierre (AM) aplican a la OS atendida.
 let tecSel = '';
+const tecOrd = { k: 'vol', asc: false };
 
 // Usuario del técnico: lo manda el Apps Script (casos[17], col. TECNICO de
 // OS POR INSTALAR). El proveedor sale del prefijo (CRC = Crece; SLK, SLC,
@@ -1530,7 +1539,9 @@ function renderTecnicos() {
     tec: Object.entries(t.nombres).sort((a, b) => b[1] - a[1]).map(x => x[0])[0] || t.usr,   // nombre más usado
     at: t.cuentas.size, vol: t.volvieron.size,
     pct: t.cuentas.size ? t.volvieron.size / t.cuentas.size : 0, det: t.volvieron
-  })).sort((a, b) => b.vol - a.vol || b.pct - a.pct || a.tec.localeCompare(b.tec));
+  }));
+  const dir = tecOrd.asc ? -1 : 1, k = tecOrd.k;
+  lista.sort((a, b) => dir * (b[k] - a[k]) || b.vol - a.vol || b.pct - a.pct || a.tec.localeCompare(b.tec));
 
   const totAt = lista.reduce((s, t) => s + t.at, 0), totVol = lista.reduce((s, t) => s + t.vol, 0);
   document.getElementById('tecRes').innerHTML =
@@ -1541,7 +1552,7 @@ function renderTecnicos() {
   if (!lista.length) { cont.innerHTML = '<div class="empty-state">Sin técnicos con estos filtros.</div>'; return; }
 
   const max = Math.max(1, ...lista.map(t => t.vol));
-  cont.innerHTML = `<table class="dt"><thead><tr><th>Técnico</th><th>Usuario</th><th class="num">Volvieron a generar OS</th><th class="num">Cuentas atendidas</th><th class="num">%</th><th></th></tr></thead><tbody>` +
+  cont.innerHTML = `<table class="dt"><thead><tr><th>Técnico</th><th>Usuario</th>${thOrd('Volvieron a generar OS', 'vol', tecOrd, 1)}${thOrd('Cuentas atendidas', 'at', tecOrd, 1)}${thOrd('%', 'pct', tecOrd, 1)}<th></th></tr></thead><tbody>` +
     lista.map(t => {
       const abierto = t.key === tecSel;
       let fila = `<tr class="clk${abierto ? ' sel' : ''}" data-key="${esc(t.key)}"><td title="${esc(t.tec)}">${esc(t.tec)}</td>` +
@@ -1573,6 +1584,8 @@ function renderTecnicos() {
 document.getElementById('tecTbl').addEventListener('click', e => {
   const ct = e.target.closest('tr[data-ct]');
   if (ct) { location.hash = 'cuenta=' + encodeURIComponent(ct.dataset.ct); return; }
+  const th = e.target.closest('th[data-s]');
+  if (th) { cambiarOrd(tecOrd, th.dataset.s); renderTecnicos(); return; }
   const tr = e.target.closest('tr[data-key]');
   if (!tr) return;
   tecSel = tecSel === tr.dataset.key ? '' : tr.dataset.key;
