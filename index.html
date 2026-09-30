@@ -1746,8 +1746,8 @@ async function buscarClienteSeg() {
     else if (r.oss.length === 1) $('segOS').value = r.oss[0];
     if (r.cuenta) $('segCuenta').value = r.cuenta;
     if (r.cliente) $('segCliente').value = r.cliente;
-    if (r.plan) $('segPlan').value = r.plan;
-    if (r.cluster && !$('segCluster').value) $('segCluster').value = r.cluster;
+    $('segPlan').value = r.plan || '';
+    if (r.cluster) $('segCluster').value = r.cluster;
     $('segOSLista').innerHTML = r.oss.map(o => `<option value="${esc(o)}">`).join('');
     const extra = !r.os && r.oss.length > 1 ? ` · ${r.oss.length} OS en la cuenta (elige una en el campo OS)` : '';
     info.textContent = base + (r.esOS ? 'OS encontrada' : 'Cuenta encontrada') + extra;

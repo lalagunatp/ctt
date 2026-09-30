@@ -85,7 +85,7 @@ const BLOQUEO_SEG = 900;                    // 15 minutos de bloqueo
 
 function normalizar_(s) {
   return String(s || '').trim().toUpperCase()
-    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
     .replace(/\s+/g, ' ');
 }
 
@@ -680,6 +680,20 @@ function getSeguimiento() {
     return obj;
   });
 
+  // Cliente, plan y cluster al día (de las hojas de clientes). Lo capturado
+  // se respeta, salvo un plan "No se especificó"; el cluster sale de BD CTT.
+  const F = fuentesClientes_(ss, true);
+  const memo = {};
+  rows.forEach(obj => {
+    const k = limpiarNum_(obj.OS) + '|' + limpiarNum_(obj.CUENTA);
+    const info = memo[k] || (memo[k] = resolverCliente_(F, obj.OS, obj.CUENTA));
+    if (!info.encontrado) return;
+    if (!obj.CUENTA) obj.CUENTA = info.cuenta;
+    if (!obj.CLIENTE) obj.CLIENTE = info.cliente;
+    if (!planValido_(obj.PLAN) && info.plan) obj.PLAN = info.plan;
+    if (info.cluster) obj.CLUSTER = info.cluster;
+  });
+
   return { rows: rows.reverse() }; // más recientes primero
 }
 
@@ -749,12 +763,12 @@ function registrarSeguimiento(data, perfil) {
 }
 
 // ================================================================
-// buscarCliente_ — Con una OS o una cuenta regresa cuenta, nombre del
-// cliente, plan, cluster y las OS de esa cuenta.
+// Datos del cliente por OS o cuenta (panel y tabla de seguimiento)
 //   Cliente: ATENCION ORDENES (E) → BASE DE DATOS (G)
 //   Plan:    ATENCION ORDENES (N) → CIERRE OS (K) → BASE DE DATOS (P)
-//            (se salta "No se especificó"). BD CTT no trae plan.
-//   BD CTT solo aporta cuenta (G), OS y cluster (por encabezado).
+//            → BD CTT N1 (p. ej. "2 O MAS SERVICIOS"), saltando "No se especificó"
+//   Cluster: BD CTT (CLUSTER). Cuenta de BD CTT = columna G.
+// Los renglones de la OS pedida van antes que los de otras OS de la cuenta.
 // ================================================================
 const AT_CUENTA = 0, AT_OS = 2, AT_CLIENTE = 4, AT_PLAN = 13;   // ATENCION ORDENES: A, C, E, N
 const BD_OS = 0, BD_CLIENTE = 6, BD_CUENTA = 14, BD_PLAN = 15;  // BASE DE DATOS: A, G, O, P
@@ -792,90 +806,119 @@ function unirRenglones_(a, b) {
 }
 
 function planValido_(v) {
-  return !!v && normalizar_(v).indexOf('NO SE ESPECIFIC') < 0;
+  const s = normalizar_(v).replace(/[^A-Z0-9]/g, '');
+  return !!s && s.indexOf('NOSEESPECIFIC') < 0 && s.indexOf('NOESPECIFIC') < 0;
 }
 
-function buscarCliente_(qIn) {
-  const q = limpiarNum_(qIn);
-  if (!q) return { ok: false, error: 'Captura una OS o una cuenta.' };
-
-  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
-  const at = hojaPorNombre_(ss, HOJA_ATENCION);
-  const bd = hojaPorNombre_(ss, HOJA_BASE_DATOS);
-  const ci = ss.getSheetByName(HOJA_CIERRE);
+// Una fuente por hoja; cada una sabe dar sus renglones por OS y por cuenta.
+// todo = true lee las hojas completas una vez (para muchos registros);
+// si no, busca cada valor con TextFinder (para una sola búsqueda).
+function fuentesClientes_(ss, todo) {
   const ctt = ss.getSheetByName(HOJA_CTT);
-
-  let iOSctt = -1, iClCtt = -1;
+  let iOS = -1, iCl = -1, iN1 = -1;
   if (ctt && ctt.getLastColumn() > 0) {
     const h = ctt.getRange(1, 1, 1, ctt.getLastColumn()).getValues()[0];
-    iOSctt = colPorEncabezado_(h, ['OS']);
-    iClCtt = colPorEncabezado_(h, ['CLUSTER']);
+    iOS = colPorEncabezado_(h, ['OS']);
+    iCl = colPorEncabezado_(h, ['CLUSTER']);
+    iN1 = colPorEncabezado_(h, ['N1']);
   }
-  const anchoCtt = Math.max(COL_CUENTA, iOSctt, iClCtt) + 1;
-  const igual = v => limpiarNum_(v) === q;
+  const specs = {
+    at:  { hoja: hojaPorNombre_(ss, HOJA_ATENCION), os: AT_OS, cta: AT_CUENTA, ancho: AT_PLAN + 1 },
+    bd:  { hoja: hojaPorNombre_(ss, HOJA_BASE_DATOS), os: BD_OS, cta: BD_CUENTA, ancho: BD_PLAN + 1 },
+    ci:  { hoja: ss.getSheetByName(HOJA_CIERRE), os: COL_CIERRE_OS, cta: -1, ancho: CI_PLAN + 1 },
+    ctt: { hoja: ctt, os: iOS, cta: COL_CUENTA, cl: iCl, n1: iN1, ancho: Math.max(COL_CUENTA, iOS, iCl, iN1) + 1 }
+  };
+  const F = {};
+  for (const k in specs) F[k] = todo ? fuenteIndexada_(specs[k]) : fuenteBuscador_(specs[k]);
+  return F;
+}
 
-  // 1) q como OS y como cuenta
-  let rAt = renglonesCon_(at, [AT_OS, AT_CUENTA], q, AT_PLAN + 1);
-  let rBd = renglonesCon_(bd, [BD_OS, BD_CUENTA], q, BD_PLAN + 1);
-  let rCtt = renglonesCon_(ctt, [iOSctt, COL_CUENTA], q, anchoCtt);
-  let rCi = renglonesCon_(ci, [COL_CIERRE_OS], q, CI_PLAN + 1);
-
-  // 2) ¿es OS? entonces se saca su cuenta y se buscan también los
-  //    renglones de esa cuenta (nombre y plan pueden venir de otra OS)
-  const ctasDeOS = [].concat(
-    rAt.filter(r => igual(r.v[AT_OS])).map(r => r.v[AT_CUENTA]),
-    rBd.filter(r => igual(r.v[BD_OS])).map(r => r.v[BD_CUENTA]),
-    iOSctt >= 0 ? rCtt.filter(r => igual(r.v[iOSctt])).map(r => r.v[COL_CUENTA]) : []
-  ).map(limpiarNum_).filter(Boolean);
-  const esOS = ctasDeOS.length > 0 || rCi.length > 0;
-  const cuenta = esOS ? (ctasDeOS[0] || '') : q;
-  // la OS como viene escrita en la hoja
-  const os = !esOS ? '' : [].concat(
-    rAt.map(r => r.v[AT_OS]), rBd.map(r => r.v[BD_OS]), rCi.map(r => r.v[COL_CIERRE_OS]),
-    iOSctt >= 0 ? rCtt.map(r => r.v[iOSctt]) : []
-  ).find(igual) || String(qIn).trim();
-
-  if (esOS && cuenta) {
-    rAt = unirRenglones_(rAt, renglonesCon_(at, [AT_CUENTA], cuenta, AT_PLAN + 1));
-    rBd = unirRenglones_(rBd, renglonesCon_(bd, [BD_CUENTA], cuenta, BD_PLAN + 1));
-    rCtt = unirRenglones_(rCtt, renglonesCon_(ctt, [COL_CUENTA], cuenta, anchoCtt));
+function fuenteIndexada_(spec) {
+  const porOS = {}, porCta = {};
+  const hoja = spec.hoja;
+  if (hoja && hoja.getLastRow() >= 2) {
+    const w = Math.min(spec.ancho, hoja.getMaxColumns());
+    hoja.getRange(2, 1, hoja.getLastRow() - 1, w).getDisplayValues().forEach((fila, i) => {
+      const v = fila.map(x => String(x || '').trim());
+      while (v.length < spec.ancho) v.push('');
+      const r = { fila: i + 2, v: v };
+      const o = spec.os >= 0 ? limpiarNum_(v[spec.os]) : '';
+      const c = spec.cta >= 0 ? limpiarNum_(v[spec.cta]) : '';
+      if (o) (porOS[o] = porOS[o] || []).push(r);
+      if (c) (porCta[c] = porCta[c] || []).push(r);
+    });
   }
+  return { spec: spec, porOS: k => porOS[k] || [], porCta: k => porCta[k] || [] };
+}
 
-  // Los renglones de la OS buscada van primero
-  const primero = (rows, col) => col < 0 || !os ? rows
-    : rows.filter(r => igual(r.v[col])).concat(rows.filter(r => !igual(r.v[col])));
-  rAt = primero(rAt, AT_OS);
-  rBd = primero(rBd, BD_OS);
-  rCtt = primero(rCtt, iOSctt);
+function fuenteBuscador_(spec) {
+  const memo = {};
+  const buscar = (col, k) => {
+    if (col < 0 || !k) return [];
+    const clave = col + '|' + k;
+    return memo[clave] || (memo[clave] = renglonesCon_(spec.hoja, [col], k, spec.ancho));
+  };
+  return { spec: spec, porOS: k => buscar(spec.os, k), porCta: k => buscar(spec.cta, k) };
+}
 
-  // OS de la cuenta (la buscada primero)
+function resolverCliente_(F, osIn, ctaIn) {
+  const os = limpiarNum_(osIn);
+  let cta = limpiarNum_(ctaIn);
+  const orden = [F.at, F.bd, F.ctt, F.ci];
+
+  // La OS como viene escrita en la hoja, y su cuenta si no se dio
+  let osTxt = '';
+  if (os) {
+    for (const f of orden) {
+      for (const r of f.porOS(os)) {
+        if (!osTxt) osTxt = r.v[f.spec.os];
+        if (!cta && f.spec.cta >= 0) cta = limpiarNum_(r.v[f.spec.cta]);
+      }
+    }
+  }
+  const renglones = f => unirRenglones_(os ? f.porOS(os) : [], cta ? f.porCta(cta) : []);
+  const at = renglones(F.at), bd = renglones(F.bd), ctt = renglones(F.ctt);
+
+  // OS de la cuenta (la pedida primero)
   const oss = [];
   const agregarOS = v => { const s = String(v || '').trim(); if (s && oss.indexOf(s) < 0) oss.push(s); };
-  if (os) agregarOS(os);
-  rAt.forEach(r => agregarOS(r.v[AT_OS]));
-  rBd.forEach(r => agregarOS(r.v[BD_OS]));
-  if (iOSctt >= 0) rCtt.forEach(r => agregarOS(r.v[iOSctt]));
+  agregarOS(osTxt);
+  at.forEach(r => agregarOS(r.v[AT_OS]));
+  bd.forEach(r => agregarOS(r.v[BD_OS]));
+  if (F.ctt.spec.os >= 0) ctt.forEach(r => agregarOS(r.v[F.ctt.spec.os]));
 
-  // Si la OS no está en CIERRE OS (o se buscó por cuenta), el plan sale de otras OS de la cuenta
-  if (!rCi.length) {
-    for (const o of oss.slice(0, 5)) rCi = unirRenglones_(rCi, renglonesCon_(ci, [COL_CIERRE_OS], o, CI_PLAN + 1));
+  // CIERRE OS no trae cuenta: se busca por la OS y, si ahí no hay plan, por otras OS de la cuenta
+  let ci = os ? F.ci.porOS(os) : [];
+  if (!ci.some(r => planValido_(r.v[CI_PLAN]))) {
+    for (const o of oss.slice(0, 5)) ci = unirRenglones_(ci, F.ci.porOS(limpiarNum_(o)));
   }
 
   const primerValor = (rows, col, ok) => {
-    for (const r of rows) if (col >= 0 && (ok ? ok(r.v[col]) : r.v[col])) return r.v[col];
+    if (col >= 0) for (const r of rows) if (ok ? ok(r.v[col]) : r.v[col]) return r.v[col];
     return '';
   };
-  const cliente = primerValor(rAt, AT_CLIENTE) || primerValor(rBd, BD_CLIENTE);
-  const plan = primerValor(rAt, AT_PLAN, planValido_) || primerValor(rCi, CI_PLAN, planValido_) ||
-    primerValor(rBd, BD_PLAN, planValido_);
-  const cluster = primerValor(rCtt, iClCtt);
-
-  const encontrado = rAt.length || rBd.length || rCtt.length || rCi.length;
   return {
-    ok: true, encontrado: !!encontrado, esOS: esOS,
-    os: os, cuenta: cuenta, cliente: cliente, plan: plan,
-    cluster: cluster, oss: oss.slice(0, 30)
+    encontrado: !!(at.length || bd.length || ctt.length || ci.length),
+    esOS: !!osTxt,
+    os: osTxt,
+    cuenta: cta,
+    cliente: primerValor(at, AT_CLIENTE) || primerValor(bd, BD_CLIENTE),
+    plan: primerValor(at, AT_PLAN, planValido_) || primerValor(ci, CI_PLAN, planValido_) ||
+      primerValor(bd, BD_PLAN, planValido_) || primerValor(ctt, F.ctt.spec.n1, planValido_),
+    cluster: primerValor(ctt, F.ctt.spec.cl),
+    oss: oss.slice(0, 30)
   };
+}
+
+// Búsqueda del panel: `q` puede ser OS o cuenta
+function buscarCliente_(qIn) {
+  const q = limpiarNum_(qIn);
+  if (!q) return { ok: false, error: 'Captura una OS o una cuenta.' };
+  const F = fuentesClientes_(SpreadsheetApp.openById(SPREADSHEET_ID), false);
+  const esOS = [F.at, F.bd, F.ctt, F.ci].some(f => f.porOS(q).length);
+  const r = esOS ? resolverCliente_(F, q, '') : resolverCliente_(F, '', q);
+  r.ok = true;
+  return r;
 }
 
 // ================================================================
