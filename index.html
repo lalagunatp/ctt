@@ -506,13 +506,21 @@ function guardarSesion() {
   try { sessionStorage.setItem('ctt_sesion', JSON.stringify({ token: TOKEN, perfil: PERFIL })); } catch(e) {}
 }
 
-// Caché del último dashboard para pintar al instante al entrar y luego
+// Caché de la última carga completa (dashboard, seguimiento, planes y
+// últimas cargas) para pintar todo al instante al entrar y luego
 // refrescar en segundo plano. Se guarda en localStorage (persiste entre
 // aperturas de la app) atado al número de empleado; si el payload no cabe,
 // el try/catch lo ignora y solo se pierde la carga instantánea.
+// Abiertos/canceladas se guardan como índices (D.ab / D.cx), no expandidos.
+let ULT = null;         // respuesta de ultimasCargas
+let PLANES_RAW = null;  // respuesta de planes, tal cual (comprimida)
 function guardarCache() {
   try {
-    if (D && PERFIL) localStorage.setItem('ctt_cache', JSON.stringify({ numero: PERFIL.numero, ts: Date.now(), D }));
+    if (!D || !PERFIL) return;
+    const compacto = Array.isArray(D.ab) ? Object.assign({}, D, { abiertos: undefined, canceladas_detail: undefined }) : D;
+    localStorage.setItem('ctt_cache', JSON.stringify({
+      numero: PERFIL.numero, ts: Date.now(), D: compacto, seg: segData, planes: PLANES_RAW, ult: ULT
+    }));
   } catch(e) {}
 }
 function cacheGuardado() {
@@ -595,6 +603,8 @@ function salir(msg) {
   V = null;
   segData = [];
   PLANES = null;
+  PLANES_RAW = null;
+  ULT = null;
   isLive = false;
   try { sessionStorage.removeItem('ctt_sesion'); } catch(e) {}
   borrarCache();
@@ -644,34 +654,78 @@ async function abrirApp() {
   document.getElementById('tabSubir').style.display = subeCierre ? '' : 'none';
   document.getElementById('cardCtt').style.display = PERFIL.carga ? '' : 'none';
   document.getElementById('mainContent').style.display = 'block';
-  cargarUltimasCargas();   // todos ven cuándo y quién actualizó
-  // Pinta al instante el último dashboard guardado (si hay) mientras llega
-  // el fresco: la app se ve de inmediato en vez de esperar toda la carga.
+  // Pinta al instante lo último guardado (si hay) mientras llega lo
+  // fresco: la app se ve completa de inmediato en vez de esperar la carga.
   const c = cacheGuardado();
   if (c) {
-    D = c.D;
-    try { render(); rutaCuenta(); } catch(e) {}
+    try { aplicarTodo({ dashboard: c.D, seguimiento: c.seg ? { rows: c.seg } : null, planes: c.planes, ultimasCargas: c.ult }); } catch(e) {}
     document.getElementById('connDot').className = 'conn-dot load';
     document.getElementById('connLabel').textContent = 'Actualizando…';
   }
   await cargarDatos();
 }
 
+// Abiertos y canceladas llegan como [índice en casos, seguimiento, registros]
+// para no repetir cada caso completo; aquí se arman como antes.
+function expandirAbiertos(d) {
+  if (!d || !Array.isArray(d.ab) || !Array.isArray(d.casos)) return d;
+  const rec = a => {
+    const c = d.casos[a[0]] || [];
+    return { dt: c[0], ct: c[1], e: c[2], os: c[3], cl: c[4], n2: c[5], tec: c[6], prov: c[7], ef: c[8], mot: c[9],
+      f: c[11], n1: c[12], n3: c[13], fa: c[14], fc: c[15], hr: c[16], usr: c[17], seg: a[1] || '', segN: a[2] || 0 };
+  };
+  d.abiertos = d.ab.map(rec);
+  d.canceladas_detail = (d.cx || []).map(rec);
+  return d;
+}
+
+// Aplica una carga completa y pinta todas las pestañas de una sola vez
+function aplicarTodo(t) {
+  if (t.planes && t.planes.lista) {
+    PLANES_RAW = t.planes;
+    PLANES = {};
+    for (const ct in t.planes.ct) PLANES[ct] = t.planes.lista[t.planes.ct[ct]];
+  } else if (t.planes !== undefined) {
+    PLANES_RAW = null;
+    PLANES = {};          // sin dato: se muestra "—" en vez de "…"
+  }
+  if (t.seguimiento && Array.isArray(t.seguimiento.rows)) segData = t.seguimiento.rows;
+  if (t.ultimasCargas) { ULT = t.ultimasCargas; pintarUltimasCargas(ULT); }
+  if (t.dashboard) {
+    D = expandirAbiertos(t.dashboard);
+    render();
+    rutaCuenta();
+  }
+  renderSeguimiento(document.getElementById('fltSeg').value, document.getElementById('fltSegRes').value);
+}
+
+// Todo en una sola llamada (acción "todo"). Si el Apps Script publicado
+// todavía no la tiene, se piden las cuatro partes en paralelo y se pinta
+// igual hasta que llegan todas.
+async function pedirTodo() {
+  const r = await api('todo');
+  if (!r.error) return r;
+  if (!/no v[aá]lida/i.test(r.error)) throw new Error(r.error);
+  const [dashboard, seguimiento, planes, ultimasCargas] = await Promise.all([
+    api('dashboard'),
+    api('seguimiento').catch(() => null),
+    api('planes').catch(() => ({})),
+    api('ultimasCargas').catch(() => null)
+  ]);
+  if (dashboard.error) throw new Error(dashboard.error);
+  return { dashboard, seguimiento, planes, ultimasCargas };
+}
+
 async function cargarDatos() {
   document.getElementById('connDot').className = 'conn-dot load';
   if (!D) document.getElementById('connLabel').textContent = 'Conectando...';
   try {
-    const live = await api('dashboard');
-    if (live.error) throw new Error(live.error);
-    D = live;
+    const t = await pedirTodo();
     isLive = true;
+    aplicarTodo(t);
     guardarCache();
     document.getElementById('connDot').className = 'conn-dot on';
     document.getElementById('connLabel').textContent = 'Conectado (live)';
-    render();
-    rutaCuenta();
-    cargarSeguimiento();
-    cargarPlanes();
   } catch (err) {
     if (!TOKEN) return;   // la sesión expiró: ya se mostró el login
     document.getElementById('connDot').className = 'conn-dot off';
@@ -774,7 +828,6 @@ async function subirCierre() {
   const r = await enviarArchivo('subirCierre', a, 'btnCierre', 'avCierre', 'archCierre');
   if (!r) return;
   avisoSubir('avCierre', '', 'Listo: CIERRE OS quedó con ' + fmt(r.filas) + ' renglón(es) (antes tenía ' + fmt(r.antes) + ').');
-  cargarUltimasCargas();
   cargarDatos();
 }
 
@@ -792,31 +845,26 @@ async function subirCtt() {
   avisoSubir('avCtt', '', 'Listo: entraron ' + fmt(r.agregados) + ' renglón(es) arriba y se quitaron ' + fmt(r.eliminados) +
     ' viejo(s) con la misma columna B' + (r.repetidasArchivo ? ' (' + fmt(r.repetidasArchivo) + ' venían repetidos en el archivo y se dejó el primero)' : '') +
     '. BD CTT quedó con ' + fmt(r.total) + ' renglón(es).');
-  cargarUltimasCargas();
   cargarDatos();
 }
 
-async function cargarUltimasCargas() {
+// Llega junto con el resto de la carga (ver cargarDatos)
+function pintarUltimasCargas(r) {
   const act = document.getElementById('actCtt');
-  try {
-    const r = await api('ultimasCargas');
-    if (!r.ok) {
-      act.textContent = 'No se pudo consultar' + (r.error ? ': ' + r.error : '.');
-      document.getElementById('actCierre').textContent = '';
-      return;
-    }
-    const txt = c => c ? 'Última carga: ' + esc(c.fecha) + ' · ' + esc(c.nombre) + ' · ' + fmt(c.filas) + ' renglón(es)' : 'Sin cargas registradas desde aquí.';
-    document.getElementById('ultCierre').innerHTML = txt(r.cierre);
-    document.getElementById('ultCtt').innerHTML = txt(r.ctt);
-    // franja visible para todos, arriba del periodo
-    const linea = (hoja, c) => '<b>' + hoja + ':</b> ' + (c
-      ? esc(fechaCarga(c.fecha)) + ' · actualizó ' + esc(c.nombre) + (c.puesto ? ' (' + esc(c.puesto) + ')' : '')
-      : 'sin cargas registradas desde el dashboard');
-    act.innerHTML = linea('BD CTT', r.ctt);
-    document.getElementById('actCierre').innerHTML = linea('CIERRE OS', r.cierre);
-  } catch (e) {
-    act.textContent = 'No se pudo consultar: ' + e.message;
+  if (!r.ok) {
+    act.textContent = 'No se pudo consultar' + (r.error ? ': ' + r.error : '.');
+    document.getElementById('actCierre').textContent = '';
+    return;
   }
+  const txt = c => c ? 'Última carga: ' + esc(c.fecha) + ' · ' + esc(c.nombre) + ' · ' + fmt(c.filas) + ' renglón(es)' : 'Sin cargas registradas desde aquí.';
+  document.getElementById('ultCierre').innerHTML = txt(r.cierre);
+  document.getElementById('ultCtt').innerHTML = txt(r.ctt);
+  // franja visible para todos, arriba del periodo
+  const linea = (hoja, c) => '<b>' + hoja + ':</b> ' + (c
+    ? esc(fechaCarga(c.fecha)) + ' · actualizó ' + esc(c.nombre) + (c.puesto ? ' (' + esc(c.puesto) + ')' : '')
+    : 'sin cargas registradas desde el dashboard');
+  act.innerHTML = linea('BD CTT', r.ctt);
+  document.getElementById('actCierre').innerHTML = linea('CIERRE OS', r.cierre);
 }
 
 // '2026-09-28 14:05' → '28/09/2026 14:05 (hoy)'
@@ -1214,22 +1262,9 @@ function cambiarOrd(ord, k) {
   else { ord.k = k; ord.asc = false; }
 }
 
-// Plan por cuenta (mismo criterio que Seguimiento). Llega aparte, después
-// del dashboard, para no hacer más lenta la carga principal.
+// Plan por cuenta (mismo criterio que Seguimiento). Llega junto con el
+// dashboard en la misma carga (ver aplicarTodo).
 let PLANES = null;      // { cuenta: plan }
-async function cargarPlanes() {
-  try {
-    const r = await api('planes');
-    if (!r.lista) throw new Error(r.error || 'sin planes');
-    PLANES = {};
-    for (const ct in r.ct) PLANES[ct] = r.lista[r.ct[ct]];
-  } catch (e) {
-    console.error('Error cargando planes:', e);
-    if (!TOKEN) return;
-    PLANES = {};          // sin dato: se muestra "—" en vez de "…"
-  }
-  if (V) renderCuentas();
-}
 const planDe = ct => PLANES ? (PLANES[ct] || '') : null;
 
 let ctLimite = 200;     // Filas visibles en Cuentas
@@ -1858,6 +1893,7 @@ async function cargarSeguimiento() {
     const result = await api('seguimiento');
     if (result.rows) {
       segData = result.rows;
+      guardarCache();
       renderSeguimiento();
       if (ctSel) renderCuentaDetalle();
     }
