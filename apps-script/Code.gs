@@ -213,6 +213,9 @@ function doGet(e) {
         case 'cliente':
           result = buscarCliente_(p.q || '');
           break;
+        case 'planes':
+          result = planesPorCuenta_();
+          break;
         case 'ultimasCargas':
           result = ultimasCargas_();
           break;
@@ -909,6 +912,38 @@ function resolverCliente_(F, osIn, ctaIn) {
     cluster: primerValor(ctt, F.ctt.spec.cl),
     oss: oss.slice(0, 30)
   };
+}
+
+// Plan de cada cuenta de BD CTT (pestaña Cuentas), con el mismo criterio
+// que el seguimiento, tomando la OS de su reporte más reciente.
+// Va comprimido: { lista: [planes distintos], ct: { cuenta: índice } }
+function planesPorCuenta_() {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const ctt = ss.getSheetByName(HOJA_CTT);
+  if (!ctt) return { error: 'No se encontró la hoja ' + HOJA_CTT };
+  const data = ctt.getDataRange().getValues();
+  const iOS = colPorEncabezado_(data[0], ['OS']);
+
+  const ult = {};   // cuenta → { k: 'fecha hora', os }
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    const cuenta = String(row[COL_CUENTA] || '').trim();
+    if (!cuenta) continue;
+    const k = fechaHora_(row[COL_FECHA]).join(' ');
+    const os = iOS >= 0 ? String(row[iOS] || '').trim() : '';
+    const u = ult[cuenta];
+    if (!u || (os && (!u.os || k >= u.k)) || (!os && !u.os && k >= u.k)) ult[cuenta] = { k: k, os: os };
+  }
+
+  const F = fuentesClientes_(ss, true);
+  const lista = [], idx = {}, ct = {};
+  for (const cuenta in ult) {
+    const plan = resolverCliente_(F, ult[cuenta].os, cuenta).plan;
+    if (!plan) continue;
+    if (!(plan in idx)) { idx[plan] = lista.length; lista.push(plan); }
+    ct[cuenta] = idx[plan];
+  }
+  return { ok: true, lista: lista, ct: ct };
 }
 
 // Búsqueda del panel: `q` puede ser OS o cuenta

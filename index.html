@@ -92,6 +92,7 @@ table.dt th[data-s]:hover,table.dt th.ord{color:var(--ac)}
 .modal-bg.show{display:flex}
 .modal{background:var(--sf);border:1px solid var(--bd);border-radius:12px;padding:20px;width:90%;max-width:520px;max-height:90vh;overflow-y:auto}
 .modal h3{font-size:1rem;margin-bottom:14px}
+.dt td.plan{max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .form-group{margin-bottom:12px}
 .form-group label{display:block;font-size:.72rem;color:var(--tx2);font-weight:500;margin-bottom:4px;text-transform:uppercase}
 .form-group input,.form-group select,.form-group textarea{width:100%;background:var(--sf2);border:1px solid var(--bd);color:var(--tx);padding:8px 12px;border-radius:6px;font-size:.82rem;font-family:inherit}
@@ -592,6 +593,7 @@ function salir(msg) {
   D = null;
   V = null;
   segData = [];
+  PLANES = null;
   isLive = false;
   try { sessionStorage.removeItem('ctt_sesion'); } catch(e) {}
   borrarCache();
@@ -668,6 +670,7 @@ async function cargarDatos() {
     render();
     rutaCuenta();
     cargarSeguimiento();
+    cargarPlanes();
   } catch (err) {
     if (!TOKEN) return;   // la sesión expiró: ya se mostró el login
     document.getElementById('connDot').className = 'conn-dot off';
@@ -1205,6 +1208,24 @@ function cambiarOrd(ord, k) {
   else { ord.k = k; ord.asc = false; }
 }
 
+// Plan por cuenta (mismo criterio que Seguimiento). Llega aparte, después
+// del dashboard, para no hacer más lenta la carga principal.
+let PLANES = null;      // { cuenta: plan }
+async function cargarPlanes() {
+  try {
+    const r = await api('planes');
+    if (!r.lista) throw new Error(r.error || 'sin planes');
+    PLANES = {};
+    for (const ct in r.ct) PLANES[ct] = r.lista[r.ct[ct]];
+  } catch (e) {
+    console.error('Error cargando planes:', e);
+    if (!TOKEN) return;
+    PLANES = {};          // sin dato: se muestra "—" en vez de "…"
+  }
+  if (V) renderCuentas();
+}
+const planDe = ct => PLANES ? (PLANES[ct] || '') : null;
+
 let ctLimite = 200;     // Filas visibles en Cuentas
 const ctOrd = { k: 'n', asc: false };
 
@@ -1228,7 +1249,7 @@ function renderCuentas(mas) {
   const cl = sel.value;
   const tipo = document.getElementById('fltCtTipo').value;
   const items = V.cuentas.filter(a =>
-    (!f || a.ct.toLowerCase().includes(f) || a.cl.toLowerCase().includes(f)) &&
+    (!f || a.ct.toLowerCase().includes(f) || a.cl.toLowerCase().includes(f) || (planDe(a.ct) || '').toLowerCase().includes(f)) &&
     (!cl || a.cl === cl) &&
     (!tipo || (tipo === 'rep' ? a.n > 1 : a[tipo] > 0))
   );
@@ -1251,15 +1272,20 @@ function renderCuentas(mas) {
     `<span>Abiertos <b style="color:var(--or)">${fmt(t.ab)}</b>${pct(t.ab)}</span>`;
 
   const celda = (v, c) => `<td class="num"${v ? ` style="color:${c}"` : ''}>${fmt(v)}</td>`;
+  const celdaPlan = ct => {
+    const p = planDe(ct);
+    if (p === null) return '<td style="color:var(--tx2)">…</td>';
+    return p ? `<td class="plan" title="${esc(p)}">${esc(p)}</td>` : '<td>—</td>';
+  };
   const rows = items.slice(0, ctLimite).map(a => `<tr class="clk" data-ct="${a.ct}">
-    <td>${a.ct}</td><td>${a.cl || '—'}</td>
+    <td>${a.ct}</td><td>${a.cl || '—'}</td>${celdaPlan(a.ct)}
     <td class="num"><strong>${fmt(a.n)}</strong></td>
     <td class="num">${fmt(a.os)}</td>
     ${celda(a.at, 'var(--gn)')}${celda(a.ca, 'var(--rd)')}${celda(a.ab, 'var(--or)')}
     <td>${a.ult || '—'}</td>
   </tr>`).join('');
   document.getElementById('ctTbl').innerHTML = `<table class="dt">
-    <thead><tr><th>Cuenta</th><th>Cluster</th>${thOrd('Reportes', 'n', ctOrd, 1)}${thOrd('OS generadas', 'os', ctOrd, 1)}${thOrd('Atendidos', 'at', ctOrd, 1)}${thOrd('Cancelados', 'ca', ctOrd, 1)}${thOrd('Abiertos', 'ab', ctOrd, 1)}${thOrd('Último reporte', 'ult', ctOrd)}</tr></thead>
+    <thead><tr><th>Cuenta</th><th>Cluster</th><th>Plan</th>${thOrd('Reportes', 'n', ctOrd, 1)}${thOrd('OS generadas', 'os', ctOrd, 1)}${thOrd('Atendidos', 'at', ctOrd, 1)}${thOrd('Cancelados', 'ca', ctOrd, 1)}${thOrd('Abiertos', 'ab', ctOrd, 1)}${thOrd('Último reporte', 'ult', ctOrd)}</tr></thead>
     <tbody>${rows}</tbody></table>`;
 
   const shown = Math.min(ctLimite, items.length);
