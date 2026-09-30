@@ -631,7 +631,8 @@ function getDashboardData() {
 // Quién creó el folio (BD CTT col. H "CREADO POR" + col. I "NUM CREADOR").
 // Los sistemas se muestran tal cual. Si es una persona: DISTRITO si está
 // en PLANTILLA (por número de empleado, col. D, o por nombre, col. E);
-// si no, OPERADOR CC. Regresa [categoría, nombre de la persona].
+// si no, OPERADOR CC. Cualquier otro valor (sin número de empleado) es OTRO.
+// Regresa [categoría, valor original de CREADO POR].
 // ================================================================
 const CREADORES_SISTEMA = ['FFM Cloud', 'AGENTE IA', 'Conector Apigee 2', 'Integracion Emplifi'];
 
@@ -672,7 +673,10 @@ function clasificadorCreador_(ss) {
     const k = normalizar_(creado) + '|' + num;
     if (!memo[k]) {
       const distrito = (num && nums.has(num)) || enPlantilla(palabrasNombre_(creado));
-      memo[k] = [distrito ? 'DISTRITO' : 'OPERADOR CC', creado];
+      // Persona = trae número de empleado (solo dígitos). Lo demás que no
+      // sea un sistema de la lista ni esté en PLANTILLA es OTRO.
+      const persona = /^\d+$/.test(num);
+      memo[k] = distrito ? ['DISTRITO', creado] : persona ? ['OPERADOR CC', creado] : ['OTRO', creado];
     }
     return memo[k];
   };
