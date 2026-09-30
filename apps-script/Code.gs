@@ -95,6 +95,17 @@ function limpiarNum_(v) {
   return s.toUpperCase();
 }
 
+// Primera columna cuyo encabezado sea alguno de `nombres` (sin importar
+// mayúsculas, acentos ni espacios de más). -1 si no está.
+function colPorEncabezado_(headers, nombres) {
+  const h = headers.map(normalizar_);
+  for (const n of nombres) {
+    const i = h.indexOf(normalizar_(n));
+    if (i >= 0) return i;
+  }
+  return -1;
+}
+
 function puestoEn_(puesto, lista) {
   const p = normalizar_(puesto);
   if (!p) return false;
@@ -424,16 +435,15 @@ function getDashboardData() {
   const osHeaders = osData.length > 0 ? osData[0] : [];
   const osRows = osData.slice(1);
 
-  // Índices CTT
-  const iOS_ctt    = cttHeaders.indexOf('OS');
-  const iEstatus   = cttHeaders.indexOf('ESTATUS');
-  const iFolio     = cttHeaders.indexOf('FOLIO');
-  const iN1        = cttHeaders.indexOf('N1');
-  const iN2        = cttHeaders.indexOf('N2');
-  const iN3        = cttHeaders.indexOf('N3');
-  const iRepetido  = cttHeaders.indexOf('REPETIDO');
-  const iOLT       = cttHeaders.indexOf('OLT');
-  const iCluster   = cttHeaders.indexOf('CLUSTER');
+  // Índices CTT (por encabezado; la hoja ha usado ESTATUS o ESTADO)
+  const iOS_ctt    = colPorEncabezado_(cttHeaders, ['OS']);
+  const iEstatus   = colPorEncabezado_(cttHeaders, ['ESTATUS', 'ESTADO']);
+  const iFolio     = colPorEncabezado_(cttHeaders, ['FOLIO']);
+  const iN1        = colPorEncabezado_(cttHeaders, ['N1']);
+  const iN2        = colPorEncabezado_(cttHeaders, ['N2']);
+  const iN3        = colPorEncabezado_(cttHeaders, ['N3']);
+  const iRepetido  = colPorEncabezado_(cttHeaders, ['REPETIDO']);
+  const iCluster   = colPorEncabezado_(cttHeaders, ['CLUSTER']);
 
   // Índices OS
   const iOS_os     = osHeaders.indexOf('OS');
@@ -742,13 +752,13 @@ function registrarSeguimiento(data, perfil) {
 // buscarCliente_ — Con una OS o una cuenta regresa cuenta, nombre del
 // cliente, plan, cluster y las OS de esa cuenta.
 //   Cliente: ATENCION ORDENES (E) → BASE DE DATOS (G)
-//   Plan:    ATENCION ORDENES (N) → CIERRE OS (K) → BASE DE DATOS (P) → BD CTT (H)
-//            (se salta "No se especificó")
+//   Plan:    ATENCION ORDENES (N) → CIERRE OS (K) → BASE DE DATOS (P)
+//            (se salta "No se especificó"). BD CTT no trae plan.
+//   BD CTT solo aporta cuenta (G), OS y cluster (por encabezado).
 // ================================================================
 const AT_CUENTA = 0, AT_OS = 2, AT_CLIENTE = 4, AT_PLAN = 13;   // ATENCION ORDENES: A, C, E, N
 const BD_OS = 0, BD_CLIENTE = 6, BD_CUENTA = 14, BD_PLAN = 15;  // BASE DE DATOS: A, G, O, P
 const CI_PLAN = 10;                                             // CIERRE OS: K (OS en C)
-const CTT_PLAN = 7;                                             // BD CTT: H (cuenta en G)
 const MAX_RENGLONES_BUSQUEDA = 60;
 
 function hojaPorNombre_(ss, nombre) {
@@ -797,11 +807,11 @@ function buscarCliente_(qIn) {
 
   let iOSctt = -1, iClCtt = -1;
   if (ctt && ctt.getLastColumn() > 0) {
-    const h = ctt.getRange(1, 1, 1, ctt.getLastColumn()).getValues()[0].map(x => String(x || '').trim());
-    iOSctt = h.indexOf('OS');
-    iClCtt = h.indexOf('CLUSTER');
+    const h = ctt.getRange(1, 1, 1, ctt.getLastColumn()).getValues()[0];
+    iOSctt = colPorEncabezado_(h, ['OS']);
+    iClCtt = colPorEncabezado_(h, ['CLUSTER']);
   }
-  const anchoCtt = Math.max(COL_CUENTA, CTT_PLAN, iOSctt, iClCtt) + 1;
+  const anchoCtt = Math.max(COL_CUENTA, iOSctt, iClCtt) + 1;
   const igual = v => limpiarNum_(v) === q;
 
   // 1) q como OS y como cuenta
@@ -857,7 +867,7 @@ function buscarCliente_(qIn) {
   };
   const cliente = primerValor(rAt, AT_CLIENTE) || primerValor(rBd, BD_CLIENTE);
   const plan = primerValor(rAt, AT_PLAN, planValido_) || primerValor(rCi, CI_PLAN, planValido_) ||
-    primerValor(rBd, BD_PLAN, planValido_) || primerValor(rCtt, CTT_PLAN, planValido_);
+    primerValor(rBd, BD_PLAN, planValido_);
   const cluster = primerValor(rCtt, iClCtt);
 
   const encontrado = rAt.length || rBd.length || rCtt.length || rCi.length;
