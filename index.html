@@ -327,7 +327,17 @@ table.dt tr.sel td{background:var(--sf2)}
         </div>
         <div class="flt">
           <input type="text" id="fltSeg" placeholder="Buscar OS, cuenta, cliente, quién reporta...">
-          <select id="fltSegRes"><option value="">Todos</option><option>Rescatada</option><option>No rescatada</option><option>En proceso</option><option>Pendiente visita</option><option>Cliente no localizado</option></select>
+          <select id="fltSegRes"><option value="">Todos</option><option>Atendida</option><option>En proceso</option><option>Pendiente visita</option><option>Cliente no localizado</option><option>Reagendada</option></select>
+          <span style="margin-left:auto;display:flex;gap:6px;align-items:center">
+            <select id="segExpPer" title="Periodo a exportar">
+              <option value="7">Últimos 7 días</option>
+              <option value="15">Últimos 15 días</option>
+              <option value="30">Últimos 30 días</option>
+              <option value="60">Últimos 60 días</option>
+              <option value="0">Todo</option>
+            </select>
+            <button class="btn btn-sm btn-outline" type="button" onclick="exportarSegCSV()">Exportar CSV</button>
+          </span>
         </div>
         <div id="segContent">
           <div class="empty-state" id="segEmpty">
@@ -422,8 +432,7 @@ table.dt tr.sel td{background:var(--sf2)}
       <label>Resultado *</label>
       <select id="segResultado">
         <option value="">Seleccionar...</option>
-        <option>Rescatada</option>
-        <option>No rescatada</option>
+        <option>Atendida</option>
         <option>En proceso</option>
         <option>Pendiente visita</option>
         <option>Cliente no localizado</option>
@@ -432,17 +441,36 @@ table.dt tr.sel td{background:var(--sf2)}
     </div>
     <div class="g2">
       <div class="form-group">
-        <label>Fecha de visita</label>
-        <input type="date" id="segFechaVisita">
+        <label>Solución / Oferta *</label>
+        <select id="segSol1" class="seg-sol" data-det="segDet1"></select>
       </div>
+      <div class="form-group" id="segDet1Box" style="display:none">
+        <label id="segDet1Lbl"></label>
+        <input type="text" id="segDet1">
+      </div>
+    </div>
+    <div class="g2">
       <div class="form-group">
-        <label>Horario</label>
-        <select id="segHorario">
+        <label>Solución / Oferta 2</label>
+        <select id="segSol2" class="seg-sol" data-det="segDet2"></select>
+      </div>
+      <div class="form-group" id="segDet2Box" style="display:none">
+        <label id="segDet2Lbl"></label>
+        <input type="text" id="segDet2">
+      </div>
+    </div>
+    <div class="g2">
+      <div class="form-group">
+        <label>¿Amenaza de cancelación en los últimos 3 meses? *</label>
+        <select id="segAmenaza">
           <option value="">Seleccionar...</option>
-          <option>Mañana (8-12)</option>
-          <option>Tarde (12-17)</option>
-          <option>Noche (17-21)</option>
+          <option>SI</option>
+          <option>NO</option>
         </select>
+      </div>
+      <div class="form-group" id="segFoliosBox" style="display:none">
+        <label>¿Cuántos folios? *</label>
+        <input type="number" id="segFolios" min="1" step="1" inputmode="numeric">
       </div>
     </div>
     <div class="form-group">
@@ -1757,6 +1785,37 @@ function renderTendencia() {
 // ============================================================
 // SEGUIMIENTO
 // ============================================================
+// Opciones de Solución / Oferta; las que traen texto piden un detalle
+const SOLUCIONES = [
+  ['UPGRADE plan base', '¿A qué plan subió?'],
+  ['DOWNGRADE plan base', '¿A qué plan bajó?'],
+  ['Ajuste en línea', ''],
+  ['UPSELL ADDONS', '¿Qué se agregó al plan?'],
+  ['DOWNSELL ADDONS', '¿Qué se eliminó del plan?'],
+  ['Visita técnica', ''],
+  ['Descuento recurrente', 'Descuento ofrecido'],
+  ['Otro', 'Indica cuál'],
+  ['N/A', ''],
+];
+const detalleSol = v => (SOLUCIONES.find(s => s[0] === v) || [])[1] || '';
+
+document.querySelectorAll('.seg-sol').forEach(sel => {
+  sel.innerHTML = '<option value="">Seleccionar...</option>' +
+    SOLUCIONES.map(s => `<option>${esc(s[0])}</option>`).join('');
+  sel.addEventListener('change', () => mostrarDetalleSol(sel));
+});
+function mostrarDetalleSol(sel) {
+  const id = sel.dataset.det, lbl = detalleSol(sel.value);
+  document.getElementById(id + 'Box').style.display = lbl ? '' : 'none';
+  document.getElementById(id + 'Lbl').textContent = lbl ? lbl + ' *' : '';
+  if (!lbl) document.getElementById(id).value = '';
+}
+document.getElementById('segAmenaza').addEventListener('change', e => {
+  const si = e.target.value === 'SI';
+  document.getElementById('segFoliosBox').style.display = si ? '' : 'none';
+  if (!si) document.getElementById('segFolios').value = '';
+});
+
 function abrirFormSeg(os, cuenta, cluster) {
   const $ = id => document.getElementById(id);
   $('segBuscar').value = os || cuenta || '';
@@ -1767,8 +1826,9 @@ function abrirFormSeg(os, cuenta, cluster) {
   $('segCluster').value = cluster || '';
   $('segOSLista').innerHTML = '';
   $('segResultado').value = '';
-  $('segFechaVisita').value = '';
-  $('segHorario').value = '';
+  document.querySelectorAll('.seg-sol').forEach(sel => { sel.value = ''; mostrarDetalleSol(sel); });
+  $('segAmenaza').value = '';
+  $('segAmenaza').dispatchEvent(new Event('change'));
   $('segComentario').value = '';
   $('segPuesto').value = PERFIL ? PERFIL.puesto : '';
   try {
@@ -1842,6 +1902,17 @@ async function enviarSeguimiento() {
     toast('Completa OS o Cuenta, Resultado y Quién reporta', true);
     return;
   }
+  const val = id => document.getElementById(id).value.trim();
+  const sol1 = val('segSol1'), sol2 = val('segSol2');
+  const det1 = detalleSol(sol1) ? val('segDet1') : '';
+  const det2 = detalleSol(sol2) ? val('segDet2') : '';
+  const amenaza = val('segAmenaza');
+  const folios = amenaza === 'SI' ? val('segFolios') : '';
+  if (!sol1) { toast('Elige la Solución / Oferta', true); return; }
+  if (detalleSol(sol1) && !det1) { toast('Completa: ' + detalleSol(sol1), true); return; }
+  if (detalleSol(sol2) && !det2) { toast('Completa: ' + detalleSol(sol2) + ' (Solución 2)', true); return; }
+  if (!amenaza) { toast('Indica si hubo amenaza de cancelación en los últimos 3 meses', true); return; }
+  if (amenaza === 'SI' && !(parseInt(folios, 10) > 0)) { toast('Indica cuántos folios de amenaza de cancelación', true); return; }
 
   const payload = {
     os: os,
@@ -1850,8 +1921,12 @@ async function enviarSeguimiento() {
     plan: document.getElementById('segPlan').value.trim(),
     cluster: document.getElementById('segCluster').value.trim(),
     resultado: resultado,
-    fecha_visita: document.getElementById('segFechaVisita').value,
-    horario: document.getElementById('segHorario').value,
+    solucion_1: sol1,
+    detalle_1: det1,
+    solucion_2: sol2,
+    detalle_2: det2,
+    amenaza_cancelacion: amenaza,
+    folios_amenaza: folios,
     comentario: document.getElementById('segComentario').value.trim(),
     quien_reporta: quien,
     puesto: document.getElementById('segPuesto').value.trim(),
@@ -1903,7 +1978,7 @@ async function cargarSeguimiento() {
 }
 
 function resTag(res) {
-  if (res === 'Rescatada') return 'tg-gn';
+  if (res === 'Atendida' || res === 'Rescatada') return 'tg-gn';
   if (res === 'No rescatada') return 'tg-rd';
   if (res === 'En proceso') return 'tg-yl';
   if (res === 'Pendiente visita') return 'tg-or';
@@ -1927,28 +2002,75 @@ function renderSeguimiento(filter, resultado) {
     return;
   }
 
-  const g =(item, ...keys) => {
-    for (const k of keys) if (item[k]) return item[k];
-    return '';
-  };
-
-  const rows = items.map(s => `<tr>
-    <td>${g(s,'MARCA_TIEMPO')}</td>
-    <td>${g(s,'os','OS')}</td>
-    <td>${g(s,'cuenta','CUENTA')}</td>
-    <td>${g(s,'cliente','CLIENTE')}</td>
-    <td>${g(s,'plan','PLAN')}</td>
-    <td>${g(s,'cluster','CLUSTER')}</td>
-    <td><span class="tg ${resTag(g(s,'resultado','RESULTADO'))}">${g(s,'resultado','RESULTADO')}</span></td>
-    <td>${g(s,'fecha_visita','FECHA_VISITA').split(' ')[0]}</td>
-    <td title="${g(s,'comentario','COMENTARIO')}">${(g(s,'comentario','COMENTARIO')).substring(0,50)}</td>
-    <td>${g(s,'quien_reporta','QUIEN_REPORTA')}</td>
-    <td>${g(s,'puesto','PUESTO')}</td>
-  </tr>`).join('');
+  const g = (s, k) => esc(segCampo(s, k));
+  const rows = items.map(s => {
+    const sol = [solTexto(s, 1), solTexto(s, 2)].filter(Boolean).join(' · ');
+    const am = segCampo(s, 'amenaza_cancelacion');
+    const fol = segCampo(s, 'folios_amenaza');
+    return `<tr>
+    <td>${g(s,'marca_tiempo')}</td>
+    <td>${g(s,'os')}</td>
+    <td>${g(s,'cuenta')}</td>
+    <td>${g(s,'cliente')}</td>
+    <td>${g(s,'plan')}</td>
+    <td>${g(s,'cluster')}</td>
+    <td><span class="tg ${resTag(segCampo(s,'resultado'))}">${g(s,'resultado')}</span></td>
+    <td title="${esc(sol)}">${esc(sol.length > 40 ? sol.substring(0,40) + '…' : sol)}</td>
+    <td>${esc(am === 'SI' && fol ? `SI (${fol})` : am)}</td>
+    <td title="${g(s,'comentario')}">${esc(segCampo(s,'comentario').substring(0,50))}</td>
+    <td>${g(s,'quien_reporta')}</td>
+    <td>${g(s,'puesto')}</td>
+  </tr>`;
+  }).join('');
 
   document.getElementById('segTbl').innerHTML = `<table class="dt">
-    <thead><tr><th>Fecha</th><th>OS</th><th>Cuenta</th><th>Cliente</th><th>Plan</th><th>Cluster</th><th>Resultado</th><th>Visita</th><th>Comentario</th><th>Quién</th><th>Puesto</th></tr></thead>
+    <thead><tr><th>Fecha</th><th>OS</th><th>Cuenta</th><th>Cliente</th><th>Plan</th><th>Cluster</th><th>Resultado</th><th>Solución / Oferta</th><th>Amenaza canc.</th><th>Comentario</th><th>Quién</th><th>Puesto</th></tr></thead>
     <tbody>${rows}</tbody></table>`;
+}
+
+// Los registros llegan con encabezados de la hoja (MAYÚSCULAS) o, en modo
+// local, con las llaves del formulario (minúsculas)
+function segCampo(s, k) {
+  return String(s[k.toUpperCase()] || s[k] || '');
+}
+function solTexto(s, n) {
+  const sol = segCampo(s, 'solucion_' + n), det = segCampo(s, 'detalle_' + n);
+  return sol && det ? `${sol}: ${det}` : sol;
+}
+
+// Exporta los registros de seguimiento a CSV por periodo (contado desde hoy)
+function exportarSegCSV() {
+  const dias = parseInt(document.getElementById('segExpPer').value, 10) || 0;
+  let desde = '';
+  if (dias) {
+    const d = new Date();
+    d.setDate(d.getDate() - (dias - 1));
+    desde = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+  const items = segData.filter(s => !desde || segCampo(s, 'marca_tiempo').substring(0, 10) >= desde);
+  if (!items.length) { toast('No hay registros en ese periodo', true); return; }
+
+  const cols = [
+    ['Fecha', 'marca_tiempo'], ['OS', 'os'], ['Cuenta', 'cuenta'], ['Cliente', 'cliente'],
+    ['Plan', 'plan'], ['Cluster', 'cluster'], ['Resultado', 'resultado'],
+    ['Solución / Oferta 1', 'solucion_1'], ['Detalle 1', 'detalle_1'],
+    ['Solución / Oferta 2', 'solucion_2'], ['Detalle 2', 'detalle_2'],
+    ['Amenaza de cancelación (3 meses)', 'amenaza_cancelacion'], ['Folios amenaza', 'folios_amenaza'],
+    ['Comentario', 'comentario'], ['Quién reporta', 'quien_reporta'], ['Puesto', 'puesto'],
+  ];
+  const cel = v => /[",\r\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
+  const lineas = [cols.map(c => cel(c[0])).join(',')]
+    .concat(items.map(s => cols.map(c => cel(segCampo(s, c[1]))).join(',')));
+  // BOM para que Excel respete acentos
+  const blob = new Blob(['﻿' + lineas.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `seguimiento_${dias ? dias + 'dias' : 'todo'}_${new Date().toISOString().slice(0, 10)}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  toast(`${fmt(items.length)} registros exportados`);
 }
 
 document.getElementById('fltSeg').addEventListener('input', e => renderSeguimiento(e.target.value, document.getElementById('fltSegRes').value));

@@ -863,10 +863,13 @@ function getSeguimiento(ssIn, FIn) {
 // ================================================================
 // Columnas de SEGUIMIENTO. Se escribe por nombre de encabezado: si a la
 // hoja le falta alguna (p. ej. CLIENTE, PLAN o PUESTO) se agrega al final.
-// Las viejas LIDER y COACH se quedan en la hoja con lo ya capturado.
+// Las viejas LIDER, COACH, FECHA_VISITA y HORARIO se quedan en la hoja con
+// lo ya capturado, pero ya no se llenan.
 const COLS_SEGUIMIENTO = [
   'MARCA_TIEMPO', 'OS', 'CUENTA', 'CLIENTE', 'PLAN', 'CLUSTER', 'RESULTADO',
-  'FECHA_VISITA', 'HORARIO', 'COMENTARIO', 'QUIEN_REPORTA', 'PUESTO'
+  'COMENTARIO', 'QUIEN_REPORTA', 'PUESTO',
+  'SOLUCION_1', 'DETALLE_1', 'SOLUCION_2', 'DETALLE_2',
+  'AMENAZA_CANCELACION', 'FOLIOS_AMENAZA'
 ];
 
 function hojaSeguimiento_(ss) {
@@ -912,12 +915,20 @@ function registrarSeguimiento(data, perfil) {
     PLAN: data.plan || '',
     CLUSTER: data.cluster || '',
     RESULTADO: data.resultado || '',
-    FECHA_VISITA: data.fecha_visita || '',
-    HORARIO: data.horario || '',
     COMENTARIO: data.comentario || '',
     QUIEN_REPORTA: data.quien_reporta || '',
-    PUESTO: data.puesto || (perfil ? perfil.puesto : '')
+    PUESTO: data.puesto || (perfil ? perfil.puesto : ''),
+    SOLUCION_1: data.solucion_1 || '',
+    DETALLE_1: data.detalle_1 || '',
+    SOLUCION_2: data.solucion_2 || '',
+    DETALLE_2: data.detalle_2 || '',
+    AMENAZA_CANCELACION: data.amenaza_cancelacion || '',
+    FOLIOS_AMENAZA: data.folios_amenaza || ''
   };
+  // que un detalle como "10%" o "1/2" no se vuelva número o fecha en la hoja
+  ['DETALLE_1', 'DETALLE_2'].forEach(k => {
+    if (/^[\d\s.,%$\/-]+$/.test(valores[k])) valores[k] = "'" + valores[k];
+  });
   sheet.appendRow(encab.map(h => valores[h] !== undefined ? valores[h] : ''));
 
   return { ok: true, timestamp: timestamp };
