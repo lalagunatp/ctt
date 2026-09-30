@@ -447,6 +447,11 @@ function getDashboardData() {
   const iN3        = colPorEncabezado_(cttHeaders, ['N3']);
   const iRepetido  = colPorEncabezado_(cttHeaders, ['REPETIDO']);
   const iCluster   = colPorEncabezado_(cttHeaders, ['CLUSTER']);
+  // Quién creó el folio: col. H "CREADO POR" y col. I "NUM CREADOR"
+  const iCreado    = colPorEncabezado_(cttHeaders, ['CREADO POR']);
+  let iNumCreador  = colPorEncabezado_(cttHeaders, ['NUM CREADOR', 'NUMERO CREADOR', 'NUM. CREADOR']);
+  if (iNumCreador < 0 && iCreado >= 0) iNumCreador = iCreado + 1;
+  const creador    = clasificadorCreador_(ss);
 
   // Índices OS
   const iOS_os     = osHeaders.indexOf('OS');
@@ -566,6 +571,7 @@ function getDashboardData() {
       fc: match ? match.fc : '',
       seg: seg ? seg.resultado : '',
       segN: seg ? seg.registros : 0,
+      cr: creador(iCreado >= 0 ? row[iCreado] : '', iNumCreador >= 0 ? row[iNumCreador] : ''),
     };
 
     records.push(rec);
@@ -605,10 +611,12 @@ function getDashboardData() {
   // [fecha, cuenta, estatus, OS, cluster, falla N2, técnico, proveedor,
   //  estatus BASE, motivo, con seguimiento (0/1),
   //  folio, N1, N3, fecha asignación OS, fecha completada OS, hora del reporte,
-  //  usuario del técnico (col. TECNICO de OS POR INSTALAR)]
+  //  usuario del técnico (col. TECNICO de OS POR INSTALAR),
+  //  creado por (FFM Cloud / AGENTE IA / ... / DISTRITO / OPERADOR CC),
+  //  nombre de la persona que lo creó (solo DISTRITO / OPERADOR CC)]
   stats.casos = records.map(r => [
     r.dt, r.ct, r.e, r.os, r.cl, r.n2, r.tec, r.prov, r.ef, r.mot, r.segN ? 1 : 0,
-    r.f, r.n1, r.n3, r.fa, r.fc, r.hr, r.usr
+    r.f, r.n1, r.n3, r.fa, r.fc, r.hr, r.usr, r.cr[0], r.cr[1]
   ]);
 
   // 5. Cierres de OS (solo las OS que aparecen en BD CTT).
@@ -617,6 +625,57 @@ function getDashboardData() {
   stats.cierres = getCierres_(ss, new Set(records.map(r => r.os).filter(Boolean)));
 
   return stats;
+}
+
+// ================================================================
+// Quién creó el folio (BD CTT col. H "CREADO POR" + col. I "NUM CREADOR").
+// Los sistemas se muestran tal cual. Si es una persona: DISTRITO si está
+// en PLANTILLA (por número de empleado, col. D, o por nombre, col. E);
+// si no, OPERADOR CC. Regresa [categoría, nombre de la persona].
+// ================================================================
+const CREADORES_SISTEMA = ['FFM Cloud', 'AGENTE IA', 'Conector Apigee 2', 'Integracion Emplifi'];
+
+function palabrasNombre_(v) {
+  return normalizar_(v).replace(/[^A-Z ]/g, ' ').split(' ').filter(Boolean);
+}
+
+function clasificadorCreador_(ss) {
+  const sistema = {};
+  CREADORES_SISTEMA.forEach(s => { sistema[normalizar_(s)] = s; });
+
+  const nums = new Set(), nombres = new Set(), personas = [];
+  const hoja = ss.getSheets().find(h => h.getSheetId() === GID_PLANTILLA);
+  if (hoja) {
+    const datos = hoja.getDataRange().getValues();
+    for (let i = 1; i < datos.length; i++) {
+      const n = limpiarNum_(datos[i][COL_PL_NUMERO]);
+      if (n) nums.add(n);
+      const p = palabrasNombre_(datos[i][COL_PL_NOMBRE]);
+      if (p.length) { nombres.add(p.slice().sort().join(' ')); personas.push(new Set(p)); }
+    }
+  }
+  // Mismo nombre aunque cambie el orden (PLANTILLA va apellidos primero);
+  // con 3+ palabras basta con que todas estén en el nombre de PLANTILLA
+  const enPlantilla = palabras => {
+    if (!palabras.length) return false;
+    if (nombres.has(palabras.slice().sort().join(' '))) return true;
+    return palabras.length >= 3 && personas.some(s => palabras.every(w => s.has(w)));
+  };
+
+  const memo = {};
+  return (creadoIn, numIn) => {
+    const creado = String(creadoIn == null ? '' : creadoIn).trim();
+    const num = limpiarNum_(numIn);
+    if (!creado && !num) return ['', ''];
+    const s = sistema[normalizar_(creado)];
+    if (s) return [s, ''];
+    const k = normalizar_(creado) + '|' + num;
+    if (!memo[k]) {
+      const distrito = (num && nums.has(num)) || enPlantilla(palabrasNombre_(creado));
+      memo[k] = [distrito ? 'DISTRITO' : 'OPERADOR CC', creado];
+    }
+    return memo[k];
+  };
 }
 
 // ================================================================
