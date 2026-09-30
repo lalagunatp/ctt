@@ -237,6 +237,7 @@ table.dt tr.sel td{background:var(--sf2)}
         <div class="card"><div class="card-t">Proveedores (última cuadrilla)</div><div id="chProv"></div></div>
         <div class="card"><div class="card-t" id="chFallasT">Top Fallas (N2)</div><div id="chFallas"></div></div>
       </div>
+      <div class="card" id="cardCre"><div class="card-t">Folios por creado por</div><div id="chCre"></div></div>
     </div>
 
     <!-- CUENTAS -->
@@ -881,16 +882,18 @@ function calcularVista() {
   const V = {
     total: 0, con_os: 0, cruzadas: 0, terminadas: 0, canceladas_base: 0,
     estatus_ctt: {}, clusters: {}, fallas: {}, motivos: {}, proveedores: {}, tecnicos: {}, por_fecha: {},
-    con_seguimiento: 0, desde, hasta,
+    creadores: {}, con_seguimiento: 0, desde, hasta,
   };
   const inc = (o, k) => { o[k] = (o[k] || 0) + 1; };
   const add = (o, k, v) => (o[k] || (o[k] = new Set())).add(v);
   const cuentas = new Map(), ctCluster = {}, ctFecha = {};
   const amCt = {}, amOs = {}, ctConOs = new Set();   // Falla de cierre (col. AM) → cuentas / OS
 
-  for (const [dt, ct, e, os, cl, n2, tec, prov, ef, mot, seg] of D.casos) {
+  for (const caso of D.casos) {
+    const [dt, ct, e, os, cl, n2, tec, prov, ef, mot, seg] = caso;
     if (desde && !(dt >= desde)) continue;
     V.total++;
+    if (caso.length > 18) inc(V.creadores, caso[18] || 'Sin dato');
     if (os) V.con_os++;
     if (ef) V.cruzadas++;
     if (ef === 'Terminada') V.terminadas++;
@@ -1058,6 +1061,9 @@ function renderResumen() {
   barChart('chEst', V.estatus_ctt, 'var(--ac)', 0, clic, selDe('resumen', 'est'));
   barChart('chMot', V.motivos, 'var(--pu)', 10, clic, selDe('resumen', 'mot'));
   barChart('chProv', V.proveedores, 'var(--cy)');
+  const hayCre = V.creadores && Object.keys(V.creadores).length;
+  document.getElementById('cardCre').style.display = hayCre ? '' : 'none';
+  if (hayCre) barChart('chCre', V.creadores, 'var(--gn)');
   if (V.fallas_am) {
     document.getElementById('chFallasT').textContent = 'Top Fallas (cierre OS) · cuentas';
     barChart('chFallas', V.fallas_am, 'var(--or)', 12, true, selDe('resumen', 'am'));
@@ -1392,7 +1398,7 @@ function renderCuentaDetalle() {
   const campo = (k, v) => v ? `<div><span class="k">${k}</span>${v}</div>` : '';
   const eTag = e => e === 'Cerrado' ? 'tg-gn' : e === 'Cancelado' ? 'tg-rd' : 'tg-or';
   const cards = reps.map(c => {
-    const [dt, , e, os, cl, n2, tec, prov, ef, mot, , f, n1, n3, fa, fc, hr] = c;
+    const [dt, , e, os, cl, n2, tec, prov, ef, mot, , f, n1, n3, fa, fc, hr, , cr, crNom] = c;
     const reporto = [n1, n3].filter(Boolean).join(' › ');
     const osInfo = !os ? '<div class="rep-n">Sin OS generada</div>' : `<div class="rep-g">
         ${campo('OS', os)}
@@ -1428,7 +1434,7 @@ function renderCuentaDetalle() {
         <button class="btn btn-sm btn-outline" style="margin-left:auto" onclick="abrirFormSeg('${os}','${ctSel}','${cl}')">+ Seguimiento</button>
       </div>`;
     return `<div class="rep">
-      <div class="rep-top"><b>${dt || 'Sin fecha'}${hr ? ' ' + hr : ''}</b>${f ? `<span>Folio ${f}</span>` : ''}${cl ? `<span>${cl}</span>` : ''}<span class="tg ${eTag(e)}">${e || 'Sin estatus'}</span></div>
+      <div class="rep-top"><b>${dt || 'Sin fecha'}${hr ? ' ' + hr : ''}</b>${f ? `<span>Folio ${f}</span>` : ''}${cr ? `<span${crNom ? ` title="${esc(crNom)}"` : ''}>Creado por ${esc(cr)}</span>` : ''}${cl ? `<span>${cl}</span>` : ''}<span class="tg ${eTag(e)}">${e || 'Sin estatus'}</span></div>
       <div class="rep-f">${n2 || 'Sin falla registrada'}${reporto ? `<span>${reporto}</span>` : ''}</div>
       ${osInfo}${cierre}${seg}
     </div>`;
