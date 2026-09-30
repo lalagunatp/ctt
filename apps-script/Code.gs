@@ -13,6 +13,7 @@ const HOJA_OS         = 'OS POR INSTALAR';  // Hoja con OS + cuadrilla/técnico
 const HOJA_ATENCION   = 'ATENCION ORDENES'; // Atención de órdenes
 const HOJA_SEGUIMIENTO = 'SEGUIMIENTO';     // Nueva hoja de seguimiento
 const HOJA_CIERRE     = 'CIERRE OS';        // Cierre de OS: falla, causa, solución, potencias
+const HOJA_BASE_DATOS = 'BASE DE DATOS';    // Base de clientes: OS, nombre, cuenta, plan
 
 // ---- COLUMNAS FIJAS DE BD CTT ----
 const COL_CUENTA = 6;                       // Columna G = número de cuenta
@@ -198,6 +199,9 @@ function doGet(e) {
         case 'buscar':
           result = buscarOS(p.os || '');
           break;
+        case 'cliente':
+          result = buscarCliente_(p.q || '');
+          break;
         case 'ultimasCargas':
           result = ultimasCargas_();
           break;
@@ -247,7 +251,7 @@ function doPost(e) {
         }
       }
     } else {
-      result = registrarSeguimiento(data);
+      result = registrarSeguimiento(data, perfil);
     }
   } catch (err) {
     result = { error: err.message };
@@ -672,43 +676,196 @@ function getSeguimiento() {
 // ================================================================
 // registrarSeguimiento — Agrega un registro de seguimiento
 // ================================================================
-function registrarSeguimiento(data) {
-  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
-  let sheet = ss.getSheetByName(HOJA_SEGUIMIENTO);
+// Columnas de SEGUIMIENTO. Se escribe por nombre de encabezado: si a la
+// hoja le falta alguna (p. ej. CLIENTE, PLAN o PUESTO) se agrega al final.
+// Las viejas LIDER y COACH se quedan en la hoja con lo ya capturado.
+const COLS_SEGUIMIENTO = [
+  'MARCA_TIEMPO', 'OS', 'CUENTA', 'CLIENTE', 'PLAN', 'CLUSTER', 'RESULTADO',
+  'FECHA_VISITA', 'HORARIO', 'COMENTARIO', 'QUIEN_REPORTA', 'PUESTO'
+];
 
-  // Crear hoja si no existe
+function hojaSeguimiento_(ss) {
+  let sheet = ss.getSheetByName(HOJA_SEGUIMIENTO);
   if (!sheet) {
     sheet = ss.insertSheet(HOJA_SEGUIMIENTO);
-    sheet.appendRow([
-      'MARCA_TIEMPO', 'OS', 'CUENTA', 'CLUSTER', 'RESULTADO',
-      'FECHA_VISITA', 'HORARIO', 'COMENTARIO',
-      'QUIEN_REPORTA', 'LIDER', 'COACH'
-    ]);
-    // Formato header
-    const headerRange = sheet.getRange(1, 1, 1, 11);
+    sheet.appendRow(COLS_SEGUIMIENTO);
+    const headerRange = sheet.getRange(1, 1, 1, COLS_SEGUIMIENTO.length);
     headerRange.setFontWeight('bold');
     headerRange.setBackground('#1a1d27');
     headerRange.setFontColor('#e8eaf0');
     sheet.setFrozenRows(1);
   }
+  return sheet;
+}
+
+function encabezadosSeguimiento_(sheet) {
+  const ancho = Math.max(sheet.getLastColumn(), 1);
+  const encab = sheet.getRange(1, 1, 1, ancho).getValues()[0].map(h => String(h || '').trim());
+  const faltan = COLS_SEGUIMIENTO.filter(c => encab.indexOf(c) < 0);
+  if (faltan.length) {
+    let desde = encab.length;
+    while (desde > 0 && !encab[desde - 1]) desde--;   // tras el último encabezado con texto
+    asegurarColumnas_(sheet, desde + faltan.length);
+    sheet.getRange(1, desde + 1, 1, faltan.length).setValues([faltan]).setFontWeight('bold');
+    encab.length = desde;
+    encab.push(...faltan);
+  }
+  return encab;
+}
+
+function registrarSeguimiento(data, perfil) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sheet = hojaSeguimiento_(ss);
+  const encab = encabezadosSeguimiento_(sheet);
 
   const timestamp = Utilities.formatDate(new Date(), 'America/Mexico_City', 'yyyy-MM-dd HH:mm:ss');
-
-  sheet.appendRow([
-    timestamp,
-    data.os || '',
-    data.cuenta || '',
-    data.cluster || '',
-    data.resultado || '',
-    data.fecha_visita || '',
-    data.horario || '',
-    data.comentario || '',
-    data.quien_reporta || '',
-    data.lider || '',
-    data.coach || ''
-  ]);
+  const valores = {
+    MARCA_TIEMPO: timestamp,
+    OS: data.os || '',
+    CUENTA: data.cuenta || '',
+    CLIENTE: data.cliente || '',
+    PLAN: data.plan || '',
+    CLUSTER: data.cluster || '',
+    RESULTADO: data.resultado || '',
+    FECHA_VISITA: data.fecha_visita || '',
+    HORARIO: data.horario || '',
+    COMENTARIO: data.comentario || '',
+    QUIEN_REPORTA: data.quien_reporta || '',
+    PUESTO: data.puesto || (perfil ? perfil.puesto : '')
+  };
+  sheet.appendRow(encab.map(h => valores[h] !== undefined ? valores[h] : ''));
 
   return { ok: true, timestamp: timestamp };
+}
+
+// ================================================================
+// buscarCliente_ — Con una OS o una cuenta regresa cuenta, nombre del
+// cliente, plan, cluster y las OS de esa cuenta.
+//   Cliente: ATENCION ORDENES (E) → BASE DE DATOS (G)
+//   Plan:    ATENCION ORDENES (N) → CIERRE OS (K) → BASE DE DATOS (P) → BD CTT (H)
+//            (se salta "No se especificó")
+// ================================================================
+const AT_CUENTA = 0, AT_OS = 2, AT_CLIENTE = 4, AT_PLAN = 13;   // ATENCION ORDENES: A, C, E, N
+const BD_OS = 0, BD_CLIENTE = 6, BD_CUENTA = 14, BD_PLAN = 15;  // BASE DE DATOS: A, G, O, P
+const CI_PLAN = 10;                                             // CIERRE OS: K (OS en C)
+const CTT_PLAN = 7;                                             // BD CTT: H (cuenta en G)
+const MAX_RENGLONES_BUSQUEDA = 60;
+
+function hojaPorNombre_(ss, nombre) {
+  const n = normalizar_(nombre);
+  return ss.getSheetByName(nombre) || ss.getSheets().find(h => normalizar_(h.getName()) === n) || null;
+}
+
+// Renglones donde alguna de las columnas `cols` (base 0) es exactamente `q`.
+// Regresa [{fila, v: [valores como se ven, de A hasta `ancho`]}]
+function renglonesCon_(hoja, cols, q, ancho) {
+  if (!hoja || !q || hoja.getLastRow() < 2) return [];
+  const ult = hoja.getLastRow();
+  const maxCol = hoja.getMaxColumns();
+  const filas = new Set();
+  for (const c of cols) {
+    if (c < 0 || c >= maxCol) continue;
+    hoja.getRange(2, c + 1, ult - 1, 1).createTextFinder(q).matchEntireCell(true).findAll()
+      .forEach(r => filas.add(r.getRow()));
+  }
+  const w = Math.min(ancho, maxCol);
+  return [...filas].sort((a, b) => a - b).slice(0, MAX_RENGLONES_BUSQUEDA).map(f => {
+    const v = hoja.getRange(f, 1, 1, w).getDisplayValues()[0].map(x => String(x || '').trim());
+    while (v.length < ancho) v.push('');
+    return { fila: f, v: v };
+  });
+}
+
+function unirRenglones_(a, b) {
+  const vistas = new Set(a.map(r => r.fila));
+  return a.concat(b.filter(r => !vistas.has(r.fila)));
+}
+
+function planValido_(v) {
+  return !!v && normalizar_(v).indexOf('NO SE ESPECIFIC') < 0;
+}
+
+function buscarCliente_(qIn) {
+  const q = limpiarNum_(qIn);
+  if (!q) return { ok: false, error: 'Captura una OS o una cuenta.' };
+
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const at = hojaPorNombre_(ss, HOJA_ATENCION);
+  const bd = hojaPorNombre_(ss, HOJA_BASE_DATOS);
+  const ci = ss.getSheetByName(HOJA_CIERRE);
+  const ctt = ss.getSheetByName(HOJA_CTT);
+
+  let iOSctt = -1, iClCtt = -1;
+  if (ctt && ctt.getLastColumn() > 0) {
+    const h = ctt.getRange(1, 1, 1, ctt.getLastColumn()).getValues()[0].map(x => String(x || '').trim());
+    iOSctt = h.indexOf('OS');
+    iClCtt = h.indexOf('CLUSTER');
+  }
+  const anchoCtt = Math.max(COL_CUENTA, CTT_PLAN, iOSctt, iClCtt) + 1;
+  const igual = v => limpiarNum_(v) === q;
+
+  // 1) q como OS y como cuenta
+  let rAt = renglonesCon_(at, [AT_OS, AT_CUENTA], q, AT_PLAN + 1);
+  let rBd = renglonesCon_(bd, [BD_OS, BD_CUENTA], q, BD_PLAN + 1);
+  let rCtt = renglonesCon_(ctt, [iOSctt, COL_CUENTA], q, anchoCtt);
+  let rCi = renglonesCon_(ci, [COL_CIERRE_OS], q, CI_PLAN + 1);
+
+  // 2) ¿es OS? entonces se saca su cuenta y se buscan también los
+  //    renglones de esa cuenta (nombre y plan pueden venir de otra OS)
+  const ctasDeOS = [].concat(
+    rAt.filter(r => igual(r.v[AT_OS])).map(r => r.v[AT_CUENTA]),
+    rBd.filter(r => igual(r.v[BD_OS])).map(r => r.v[BD_CUENTA]),
+    iOSctt >= 0 ? rCtt.filter(r => igual(r.v[iOSctt])).map(r => r.v[COL_CUENTA]) : []
+  ).map(limpiarNum_).filter(Boolean);
+  const esOS = ctasDeOS.length > 0 || rCi.length > 0;
+  const cuenta = esOS ? (ctasDeOS[0] || '') : q;
+  // la OS como viene escrita en la hoja
+  const os = !esOS ? '' : [].concat(
+    rAt.map(r => r.v[AT_OS]), rBd.map(r => r.v[BD_OS]), rCi.map(r => r.v[COL_CIERRE_OS]),
+    iOSctt >= 0 ? rCtt.map(r => r.v[iOSctt]) : []
+  ).find(igual) || String(qIn).trim();
+
+  if (esOS && cuenta) {
+    rAt = unirRenglones_(rAt, renglonesCon_(at, [AT_CUENTA], cuenta, AT_PLAN + 1));
+    rBd = unirRenglones_(rBd, renglonesCon_(bd, [BD_CUENTA], cuenta, BD_PLAN + 1));
+    rCtt = unirRenglones_(rCtt, renglonesCon_(ctt, [COL_CUENTA], cuenta, anchoCtt));
+  }
+
+  // Los renglones de la OS buscada van primero
+  const primero = (rows, col) => col < 0 || !os ? rows
+    : rows.filter(r => igual(r.v[col])).concat(rows.filter(r => !igual(r.v[col])));
+  rAt = primero(rAt, AT_OS);
+  rBd = primero(rBd, BD_OS);
+  rCtt = primero(rCtt, iOSctt);
+
+  // OS de la cuenta (la buscada primero)
+  const oss = [];
+  const agregarOS = v => { const s = String(v || '').trim(); if (s && oss.indexOf(s) < 0) oss.push(s); };
+  if (os) agregarOS(os);
+  rAt.forEach(r => agregarOS(r.v[AT_OS]));
+  rBd.forEach(r => agregarOS(r.v[BD_OS]));
+  if (iOSctt >= 0) rCtt.forEach(r => agregarOS(r.v[iOSctt]));
+
+  // Si la OS no está en CIERRE OS (o se buscó por cuenta), el plan sale de otras OS de la cuenta
+  if (!rCi.length) {
+    for (const o of oss.slice(0, 5)) rCi = unirRenglones_(rCi, renglonesCon_(ci, [COL_CIERRE_OS], o, CI_PLAN + 1));
+  }
+
+  const primerValor = (rows, col, ok) => {
+    for (const r of rows) if (col >= 0 && (ok ? ok(r.v[col]) : r.v[col])) return r.v[col];
+    return '';
+  };
+  const cliente = primerValor(rAt, AT_CLIENTE) || primerValor(rBd, BD_CLIENTE);
+  const plan = primerValor(rAt, AT_PLAN, planValido_) || primerValor(rCi, CI_PLAN, planValido_) ||
+    primerValor(rBd, BD_PLAN, planValido_) || primerValor(rCtt, CTT_PLAN, planValido_);
+  const cluster = primerValor(rCtt, iClCtt);
+
+  const encontrado = rAt.length || rBd.length || rCtt.length || rCi.length;
+  return {
+    ok: true, encontrado: !!encontrado, esOS: esOS,
+    os: os, cuenta: cuenta, cliente: cliente, plan: plan,
+    cluster: cluster, oss: oss.slice(0, 30)
+  };
 }
 
 // ================================================================
@@ -779,21 +936,10 @@ function buscarOS(osQuery) {
 // ================================================================
 function crearHojaSeguimiento() {
   const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
-  let sheet = ss.getSheetByName(HOJA_SEGUIMIENTO);
-  if (sheet) {
+  if (ss.getSheetByName(HOJA_SEGUIMIENTO)) {
     Logger.log('La hoja SEGUIMIENTO ya existe');
     return;
   }
-  sheet = ss.insertSheet(HOJA_SEGUIMIENTO);
-  sheet.appendRow([
-    'MARCA_TIEMPO', 'OS', 'CUENTA', 'CLUSTER', 'RESULTADO',
-    'FECHA_VISITA', 'HORARIO', 'COMENTARIO',
-    'QUIEN_REPORTA', 'LIDER', 'COACH'
-  ]);
-  const headerRange = sheet.getRange(1, 1, 1, 11);
-  headerRange.setFontWeight('bold');
-  headerRange.setBackground('#1a1d27');
-  headerRange.setFontColor('#e8eaf0');
-  sheet.setFrozenRows(1);
+  hojaSeguimiento_(ss);
   Logger.log('Hoja SEGUIMIENTO creada correctamente');
 }

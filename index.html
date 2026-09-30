@@ -324,7 +324,7 @@ table.dt tr.sel td{background:var(--sf2)}
           <button class="btn btn-green btn-sm" onclick="abrirFormSeg()">+ Nuevo Registro</button>
         </div>
         <div class="flt">
-          <input type="text" id="fltSeg" placeholder="Buscar OS, quien reporta...">
+          <input type="text" id="fltSeg" placeholder="Buscar OS, cuenta, cliente, quién reporta...">
           <select id="fltSegRes"><option value="">Todos</option><option>Rescatada</option><option>No rescatada</option><option>En proceso</option><option>Pendiente visita</option><option>Cliente no localizado</option></select>
         </div>
         <div id="segContent">
@@ -384,17 +384,37 @@ table.dt tr.sel td{background:var(--sf2)}
   <div class="modal">
     <h3>Registrar Seguimiento</h3>
     <div class="form-group">
-      <label>OS *</label>
-      <input type="text" id="segOS" placeholder="OS-XXXXXXXX" autocomplete="off">
+      <label>Buscar por OS o cuenta</label>
+      <div style="display:flex;gap:6px">
+        <input type="text" id="segBuscar" placeholder="Número de OS o de cuenta" autocomplete="off">
+        <button class="btn btn-sm btn-outline" type="button" onclick="buscarClienteSeg()" id="btnSegBuscar">Buscar</button>
+      </div>
       <div id="segOSInfo" style="font-size:.7rem;color:var(--tx2);margin-top:4px"></div>
     </div>
-    <div class="form-group">
-      <label>Cuenta</label>
-      <input type="text" id="segCuenta" placeholder="Autocompletado si existe">
+    <div class="g2">
+      <div class="form-group">
+        <label>OS</label>
+        <input type="text" id="segOS" list="segOSLista" placeholder="Autocompletado si existe" autocomplete="off">
+        <datalist id="segOSLista"></datalist>
+      </div>
+      <div class="form-group">
+        <label>Cuenta</label>
+        <input type="text" id="segCuenta" placeholder="Autocompletado si existe">
+      </div>
     </div>
     <div class="form-group">
-      <label>Cluster</label>
-      <input type="text" id="segCluster" placeholder="Autocompletado si existe">
+      <label>Nombre del cliente</label>
+      <input type="text" id="segCliente" placeholder="Autocompletado si existe">
+    </div>
+    <div class="g2">
+      <div class="form-group">
+        <label>Plan contratado</label>
+        <input type="text" id="segPlan" placeholder="Autocompletado si existe">
+      </div>
+      <div class="form-group">
+        <label>Cluster</label>
+        <input type="text" id="segCluster" placeholder="Autocompletado si existe">
+      </div>
     </div>
     <div class="form-group">
       <label>Resultado *</label>
@@ -433,13 +453,9 @@ table.dt tr.sel td{background:var(--sf2)}
         <input type="text" id="segQuien" placeholder="Tu nombre">
       </div>
       <div class="form-group">
-        <label>Líder</label>
-        <input type="text" id="segLider" placeholder="Nombre del líder">
+        <label>Puesto</label>
+        <input type="text" id="segPuesto" placeholder="Tu puesto">
       </div>
-    </div>
-    <div class="form-group">
-      <label>Coach</label>
-      <input type="text" id="segCoach" placeholder="Nombre del coach">
     </div>
     <div class="form-actions">
       <button class="btn btn-outline" onclick="cerrarModal()">Cancelar</button>
@@ -1675,33 +1691,75 @@ function renderTendencia() {
 // SEGUIMIENTO
 // ============================================================
 function abrirFormSeg(os, cuenta, cluster) {
-  document.getElementById('segOS').value = os || '';
-  document.getElementById('segCuenta').value = cuenta || '';
-  document.getElementById('segCluster').value = cluster || '';
-  document.getElementById('segResultado').value = '';
-  document.getElementById('segFechaVisita').value = '';
-  document.getElementById('segHorario').value = '';
-  document.getElementById('segComentario').value = '';
-  // Restore last user
+  const $ = id => document.getElementById(id);
+  $('segBuscar').value = os || cuenta || '';
+  $('segOS').value = os || '';
+  $('segCuenta').value = cuenta || '';
+  $('segCliente').value = '';
+  $('segPlan').value = '';
+  $('segCluster').value = cluster || '';
+  $('segOSLista').innerHTML = '';
+  $('segResultado').value = '';
+  $('segFechaVisita').value = '';
+  $('segHorario').value = '';
+  $('segComentario').value = '';
+  $('segPuesto').value = PERFIL ? PERFIL.puesto : '';
   try {
-    document.getElementById('segQuien').value = localStorage.getItem('ctt_quien') || (PERFIL ? PERFIL.nombre : '');
-    document.getElementById('segLider').value = localStorage.getItem('ctt_lider') || '';
-    document.getElementById('segCoach').value = localStorage.getItem('ctt_coach') || '';
+    $('segQuien').value = localStorage.getItem('ctt_quien') || (PERFIL ? PERFIL.nombre : '');
   } catch(e) {}
-  document.getElementById('segOSInfo').textContent = '';
-  document.getElementById('modalSeg').classList.add('show');
+  $('segOSInfo').textContent = $('segOSInfo').dataset.base = '';
+  $('modalSeg').classList.add('show');
 
-  // Auto-lookup OS info
+  // Datos del caso que ya trae el dashboard
   if (os && D && D.abiertos) {
     const found = D.abiertos.find(a => a.os === os);
     if (found) {
-      document.getElementById('segOSInfo').textContent =
+      $('segOSInfo').textContent = $('segOSInfo').dataset.base =
         `${found.cl} | ${found.n2} | Est.CTT: ${found.e} | Est.BASE: ${found.ef || 'Sin cruce'}`;
-      if (!cuenta) document.getElementById('segCuenta').value = found.ct;
-      if (!cluster) document.getElementById('segCluster').value = found.cl;
+      if (!cuenta) $('segCuenta').value = found.ct;
+      if (!cluster) $('segCluster').value = found.cl;
     }
   }
+  if (os || cuenta) buscarClienteSeg();
+  else $('segBuscar').focus();
 }
+
+// Busca la OS o cuenta en ATENCION ORDENES / BASE DE DATOS / CIERRE OS / BD CTT
+// y llena cuenta, OS, nombre del cliente, plan y cluster
+let segBusqueda = 0;
+async function buscarClienteSeg() {
+  const $ = id => document.getElementById(id);
+  const q = $('segBuscar').value.trim();
+  if (!q) { toast('Captura una OS o una cuenta', true); return; }
+  if (!isLive || !API_URL) { $('segOSInfo').textContent = 'Sin conexión: no se puede buscar el cliente.'; return; }
+  const n = ++segBusqueda;
+  const info = $('segOSInfo');
+  const base = info.dataset.base ? info.dataset.base + ' · ' : '';
+  info.textContent = base + 'Buscando ' + q + '...';
+  $('btnSegBuscar').disabled = true;
+  try {
+    const r = await api('cliente', { q });
+    if (n !== segBusqueda) return;
+    if (r.error) throw new Error(r.error);
+    if (!r.encontrado) { info.textContent = base + 'No se encontró ' + q + ' en las hojas de clientes.'; return; }
+    if (r.os) $('segOS').value = r.os;
+    else if (r.oss.length === 1) $('segOS').value = r.oss[0];
+    if (r.cuenta) $('segCuenta').value = r.cuenta;
+    if (r.cliente) $('segCliente').value = r.cliente;
+    if (r.plan) $('segPlan').value = r.plan;
+    if (r.cluster && !$('segCluster').value) $('segCluster').value = r.cluster;
+    $('segOSLista').innerHTML = r.oss.map(o => `<option value="${esc(o)}">`).join('');
+    const extra = !r.os && r.oss.length > 1 ? ` · ${r.oss.length} OS en la cuenta (elige una en el campo OS)` : '';
+    info.textContent = base + (r.esOS ? 'OS encontrada' : 'Cuenta encontrada') + extra;
+  } catch (err) {
+    if (n === segBusqueda) info.textContent = base + 'Error al buscar: ' + err.message;
+  } finally {
+    if (n === segBusqueda) $('btnSegBuscar').disabled = false;
+  }
+}
+document.getElementById('segBuscar').addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); buscarClienteSeg(); }
+});
 
 function cerrarModal() {
   document.getElementById('modalSeg').classList.remove('show');
@@ -1709,33 +1767,30 @@ function cerrarModal() {
 
 async function enviarSeguimiento() {
   const os = document.getElementById('segOS').value.trim();
+  const cuenta = document.getElementById('segCuenta').value.trim();
   const resultado = document.getElementById('segResultado').value;
   const quien = document.getElementById('segQuien').value.trim();
 
-  if (!os || !resultado || !quien) {
-    toast('Completa OS, Resultado y Quién reporta', true);
+  if ((!os && !cuenta) || !resultado || !quien) {
+    toast('Completa OS o Cuenta, Resultado y Quién reporta', true);
     return;
   }
 
   const payload = {
     os: os,
-    cuenta: document.getElementById('segCuenta').value.trim(),
+    cuenta: cuenta,
+    cliente: document.getElementById('segCliente').value.trim(),
+    plan: document.getElementById('segPlan').value.trim(),
     cluster: document.getElementById('segCluster').value.trim(),
     resultado: resultado,
     fecha_visita: document.getElementById('segFechaVisita').value,
     horario: document.getElementById('segHorario').value,
     comentario: document.getElementById('segComentario').value.trim(),
     quien_reporta: quien,
-    lider: document.getElementById('segLider').value.trim(),
-    coach: document.getElementById('segCoach').value.trim(),
+    puesto: document.getElementById('segPuesto').value.trim(),
   };
 
-  // Save user prefs
-  try {
-    localStorage.setItem('ctt_quien', payload.quien_reporta);
-    localStorage.setItem('ctt_lider', payload.lider);
-    localStorage.setItem('ctt_coach', payload.coach);
-  } catch(e) {}
+  try { localStorage.setItem('ctt_quien', payload.quien_reporta); } catch(e) {}
 
   if (isLive && API_URL) {
     document.getElementById('btnEnviar').textContent = 'Enviando...';
@@ -1792,7 +1847,7 @@ function renderSeguimiento(filter, resultado) {
   const f = (filter || '').toLowerCase();
   const r = resultado || '';
   const items = segData.filter(s => {
-    const matchF = !f || [s.os || s.OS, s.quien_reporta || s.QUIEN_REPORTA, s.cuenta || s.CUENTA, s.cluster || s.CLUSTER].some(v => (v || '').toLowerCase().includes(f));
+    const matchF = !f || [s.os || s.OS, s.quien_reporta || s.QUIEN_REPORTA, s.cuenta || s.CUENTA, s.cliente || s.CLIENTE, s.cluster || s.CLUSTER].some(v => (v || '').toLowerCase().includes(f));
     const matchR = !r || (s.resultado || s.RESULTADO) === r;
     return matchF && matchR;
   });
@@ -1813,17 +1868,18 @@ function renderSeguimiento(filter, resultado) {
     <td>${g(s,'MARCA_TIEMPO')}</td>
     <td>${g(s,'os','OS')}</td>
     <td>${g(s,'cuenta','CUENTA')}</td>
+    <td>${g(s,'cliente','CLIENTE')}</td>
+    <td>${g(s,'plan','PLAN')}</td>
     <td>${g(s,'cluster','CLUSTER')}</td>
     <td><span class="tg ${resTag(g(s,'resultado','RESULTADO'))}">${g(s,'resultado','RESULTADO')}</span></td>
     <td>${g(s,'fecha_visita','FECHA_VISITA')}</td>
     <td title="${g(s,'comentario','COMENTARIO')}">${(g(s,'comentario','COMENTARIO')).substring(0,50)}</td>
     <td>${g(s,'quien_reporta','QUIEN_REPORTA')}</td>
-    <td>${g(s,'lider','LIDER')}</td>
-    <td>${g(s,'coach','COACH')}</td>
+    <td>${g(s,'puesto','PUESTO')}</td>
   </tr>`).join('');
 
   document.getElementById('segTbl').innerHTML = `<table class="dt">
-    <thead><tr><th>Fecha</th><th>OS</th><th>Cuenta</th><th>Cluster</th><th>Resultado</th><th>Visita</th><th>Comentario</th><th>Quién</th><th>Líder</th><th>Coach</th></tr></thead>
+    <thead><tr><th>Fecha</th><th>OS</th><th>Cuenta</th><th>Cliente</th><th>Plan</th><th>Cluster</th><th>Resultado</th><th>Visita</th><th>Comentario</th><th>Quién</th><th>Puesto</th></tr></thead>
     <tbody>${rows}</tbody></table>`;
 }
 
