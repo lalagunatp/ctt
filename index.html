@@ -202,6 +202,9 @@ body.rc-abierto{overflow:hidden}
 .rc-box h3{font-size:7.8pt;font-weight:700;margin-bottom:3px}
 .rc-edit{outline:1px dashed #b7c3f5;outline-offset:2px;border-radius:2px}
 .rc-edit:focus{outline:1px solid #4a6cf7;background:#fbfcff}
+.rc-tag{display:inline-block;padding:0 5px;border-radius:3px;font-size:6.8pt;font-weight:600;white-space:nowrap}
+.rc-t tr.pri td{border-bottom:none;padding-top:3px;padding-bottom:0}
+.rc-t tr.det td{white-space:normal;max-width:none;font-size:6.8pt;color:#4b5064;padding-top:1px;padding-bottom:3px;line-height:1.3}
 .rc-pie{margin-top:8px;padding-top:5px;border-top:1px solid #dde0e8;font-size:6.6pt;color:#6b7085;line-height:1.35}
 @media print{
   @page{size:letter portrait;margin:.4in}
@@ -273,7 +276,7 @@ body.rc-abierto{overflow:hidden}
         <div class="rc-menu" id="rcMenu" role="menu">
           <button role="menuitem" data-rep="comite"><b>Comité de dirección</b><span>Visión general, avances y propuestas</span></button>
           <button role="menuitem" data-rep="tecnicos"><b>Técnicos y fallas</b><span>Repite OS, tiempos (SLA), potencias, causas y soluciones</span></button>
-          <button role="menuitem" data-rep="seguimiento"><b>Seguimiento</b><span>Efectividad de ofertas, amenazas, pendientes y productividad</span></button>
+          <button role="menuitem" data-rep="seguimiento"><b>Seguimiento</b><span>Análisis de cuentas con seguimiento, abiertas y en riesgo</span></button>
         </div>
       </div>
     </div>
@@ -566,7 +569,7 @@ body.rc-abierto{overflow:hidden}
   <div class="rc-bar">
     <b id="rcTitulo">Reporte</b>
     <span class="rc-nota">Los textos con borde punteado se pueden editar antes de imprimir. En el diálogo elige “Guardar como PDF”, tamaño Carta, vertical.</span>
-    <button class="btn btn-sm btn-outline" id="rcCsv" style="display:none" title="Lista completa de cuentas pendientes de seguimiento">CSV pendientes</button>
+    <button class="btn btn-sm btn-outline" id="rcCsv" style="display:none" title="Todas las cuentas con seguimiento y su detalle">CSV cuentas</button>
     <button class="btn btn-sm" id="rcImprimir">Imprimir / PDF</button>
     <button class="btn btn-sm btn-outline" id="rcCerrar">Cerrar</button>
   </div>
@@ -2798,222 +2801,243 @@ function htmlTecnicos(R) {
 }
 
 // ============================================================
-// REPORTE DE SEGUIMIENTO
-//   no volvió  = la cuenta no tuvo otro reporte CTT en los 30 días
-//                siguientes al registro de seguimiento
-//   cobertura  = reportes reincidentes cuya cuenta tiene un seguimiento
-//                registrado el mismo día o después del reporte
-//   pendientes = cuentas con 2+ reportes en los últimos 30 días sin
-//                seguimiento posterior, y cuentas con amenaza de
-//                cancelación que volvieron a reportar después del seguimiento
+// REPORTE DE SEGUIMIENTO — análisis de las cuentas con seguimiento
+// registrado en los últimos 60 días: qué pasó después, qué se ofreció,
+// cuáles siguen abiertas, desde cuándo y quién las tiene.
+//   abierta    = su último reporte CTT sigue abierto (no Cerrado ni
+//                Cancelado) o su último seguimiento no es Atendida
+//   estado (en este orden): En riesgo (amenaza de cancelación y volvió a
+//   reportar) · Abierta · Volvió a reportar (después del primer
+//   seguimiento) · En observación (Atendida, sin nuevo reporte, pero aún
+//   no pasan 30 días) · Resuelta
+//   los días se cuentan hasta el último dato (BD CTT o seguimiento)
 // ============================================================
-let RC_PEND = [];       // lista completa de pendientes (para el CSV)
+let RC_CTAS = [];       // todas las cuentas analizadas (para el CSV)
+const ESTADOS_SEG = [
+  ['En riesgo', '#c62828'], ['Abierta', '#d9480f'], ['Volvió a reportar', '#b7791f'],
+  ['En observación', '#6b7085'], ['Resuelta', '#157f3b']
+];
+const colorEstado = e => (ESTADOS_SEG.find(x => x[0] === e) || [, '#6b7085'])[1];
+const abiertoCTT = e => e !== 'Cerrado' && e !== 'Cancelado';
 
 function datosSeguimiento() {
-  const { hasta, desde, en, casos, porCuenta, reinc, segs, tresCortes } = baseRC();
-  const repDe = ct => porCuenta.get(ct) || [];
-  const segCta = new Map();
-  for (const x of segs) {
-    x.volvio = !!x.ct && repDe(x.ct).some(c => c[0] > x.dtReal && diasEntre(x.dtReal, c[0]) <= 30);
-    x.completo = diasEntre(x.dtReal, hasta) >= 30;
-    x.res = segCampo(x.s, 'resultado');
-    x.am = segCampo(x.s, 'amenaza_cancelacion') === 'SI';
-    x.folios = x.am ? parseInt(segCampo(x.s, 'folios_amenaza'), 10) || 0 : 0;
-    x.quien = segCampo(x.s, 'quien_reporta').trim() || 'Sin nombre';
-    x.puesto = segCampo(x.s, 'puesto').trim();
-    x.sols = [...new Set([1, 2].map(i => segCampo(x.s, 'solucion_' + i)).filter(v => v && v !== 'N/A'))];
-    const ult = repDe(x.ct)[repDe(x.ct).length - 1];
-    x.cl = segCampo(x.s, 'cluster').trim() || (ult && ult[4]) || '';
-    x.plan = segCampo(x.s, 'plan').trim();
-    if (x.ct) (segCta.get(x.ct) || segCta.set(x.ct, []).get(x.ct)).push(x);
-  }
-  const s60 = segs.filter(x => en(x.dt, desde, hasta));
-  const cubierto = c => (segCta.get(ctaDe(c)) || []).some(x => x.dtReal >= c[0]);
+  const { hasta, desde, porCuenta, oss, segs } = baseRC();
+  const ref = segs.reduce((m, x) => (x.dtReal > m ? x.dtReal : m), hasta);
+  const porCta = new Map();
+  for (const x of segs) if (x.ct && x.dtReal >= desde) (porCta.get(x.ct) || porCta.set(x.ct, []).get(x.ct)).push(x);
 
-  function bloque(d1, d2) {
-    const b = { d1, d2, enCurso: diasEntre(d2, hasta) < 30, n: 0, cts: new Set(), at: 0, nl: 0, am: 0, vol: 0, conCt: 0, re: 0, reCub: 0 };
-    for (const x of s60) {
-      if (!en(x.dt, d1, d2)) continue;
-      b.n++;
-      if (x.ct) { b.cts.add(x.ct); b.conCt++; if (x.volvio) b.vol++; }
-      if (x.res === 'Atendida') b.at++;
-      if (x.res === 'Cliente no localizado') b.nl++;
-      if (x.am) b.am++;
+  const ctas = [];
+  for (const [ct, xs] of porCta) {
+    xs.sort((a, b) => segCampo(a.s, 'marca_tiempo').localeCompare(segCampo(b.s, 'marca_tiempo')));
+    const u = xs[xs.length - 1], g = k => segCampo(u.s, k).trim();
+    const reps = porCuenta.get(ct) || [];
+    const ini = xs[0].dtReal;
+    const antes = reps.filter(c => c[0] <= ini), despues = reps.filter(c => c[0] > ini);
+    const ult = reps[reps.length - 1];
+    const res = g('resultado') || 'Sin dato';
+    const ctAb = !!ult && abiertoCTT(ult[2]);
+    const segAb = res !== 'Atendida';
+    const am = xs.some(x => segCampo(x.s, 'amenaza_cancelacion') === 'SI');
+    const folios = Math.max(0, ...xs.map(x => parseInt(segCampo(x.s, 'folios_amenaza'), 10) || 0));
+    const osSeg = new Set(xs.map(x => x.os).filter(Boolean));
+    const osNuevas = [...new Set(despues.map(c => c[3]).filter(o => o && !osSeg.has(o)))];
+    const estado = am && despues.length ? 'En riesgo'
+      : (ctAb || segAb) ? 'Abierta'
+      : despues.length ? 'Volvió a reportar'
+      : diasEntre(ini, ref) < 30 ? 'En observación' : 'Resuelta';
+    // última OS de la cuenta: técnico y cierre
+    const conOs = reps.filter(c => c[3]);
+    const uo = conOs.length ? oss.get(conOs[conOs.length - 1][3]) : null;
+    if (uo) detalleOS(uo);
+    const sols = [1, 2].map(i => {
+      const so = segCampo(u.s, 'solucion_' + i), de = segCampo(u.s, 'detalle_' + i);
+      return so && so !== 'N/A' ? so + (de ? ': ' + de : '') : '';
+    }).filter(Boolean);
+    ctas.push({
+      ct, estado, res, ctAb, segAb, am, folios,
+      diasCt: ctAb ? diasEntre(ult[0], ref) : null,
+      diasSeg: segAb ? diasEntre(u.dtReal, ref) : null,
+      fSeg: u.dtReal, fIni: ini, nSeg: xs.length,
+      quien: g('quien_reporta') || 'Sin nombre', puesto: g('puesto'),
+      cliente: g('cliente'), plan: g('plan') || planDe(ct) || '', cl: g('cluster') || (ult && ult[4]) || '',
+      sols, ofertas: [...new Set(xs.flatMap(x => [1, 2].map(i => segCampo(x.s, 'solucion_' + i)).filter(v => v && v !== 'N/A')))],
+      com: g('comentario'),
+      antes: antes.length, despues: despues.length, osNuevas: osNuevas.length,
+      ultF: ult ? ult[0] : '', ultE: ult ? ult[2] : '', ultN2: ult ? ult[5] : '',
+      fallas: [...new Set(reps.map(c => c[5]).filter(Boolean))],
+      tec: uo ? uo.tec : '', os: uo ? uo.os : '',
+      cie: uo && uo.conCierre ? [uo.am, uo.sol].filter(Boolean).join(' → ') + (uo.pf != null ? ' · ' + uo.pf + ' dBm' : '') : ''
+    });
+  }
+  RC_CTAS = ctas.sort((a, b) =>
+    ESTADOS_SEG.findIndex(x => x[0] === a.estado) - ESTADOS_SEG.findIndex(x => x[0] === b.estado) ||
+    (b.ctAb && b.segAb) - (a.ctAb && a.segAb) ||
+    Math.max(b.diasCt || 0, b.diasSeg || 0) - Math.max(a.diasCt || 0, a.diasSeg || 0));
+
+  const R = { desde, hasta, ref, ctas };
+  R.estados = ESTADOS_SEG.map(([e]) => [e, ctas.filter(c => c.estado === e).length]);
+  const nE = e => (R.estados.find(x => x[0] === e) || [, 0])[1];
+  R.evaluables = ctas.length - nE('En observación');
+  R.pRes = pctDe(nE('Resuelta'), R.evaluables);
+  R.pVol = pctDe(ctas.filter(c => c.despues).length, ctas.length);
+
+  // antigüedad de lo abierto
+  const cubetas = [['0–3 días', 0, 3], ['4–7 días', 4, 7], ['8–15 días', 8, 15], ['16+ días', 16, 1e9]];
+  const ant = v => cubetas.map(([l, a, b]) => [l, ctas.filter(c => c[v] != null && c[v] >= a && c[v] <= b).length]);
+  R.antCt = ant('diasCt');
+  R.antSeg = ant('diasSeg');
+  R.nCtAb = ctas.filter(c => c.ctAb).length;
+  R.nSegAb = ctas.filter(c => c.segAb).length;
+  R.nAmbas = ctas.filter(c => c.ctAb && c.segAb).length;
+  R.nNl = ctas.filter(c => c.res === 'Cliente no localizado').length;
+
+  // cruces
+  const cruce = (llave, multi) => {
+    const g = new Map();
+    for (const c of ctas) {
+      for (const k of (multi ? llave(c) : [llave(c)])) {
+        if (!k) continue;
+        let x = g.get(k);
+        if (!x) g.set(k, x = { k, n: 0, est: {}, dias: [] });
+        x.n++;
+        x.est[c.estado] = (x.est[c.estado] || 0) + 1;
+        if (c.estado === 'Abierta') x.dias.push(Math.max(c.diasCt || 0, c.diasSeg || 0));
+      }
     }
-    for (const c of casos) if (en(c[0], d1, d2) && reinc.has(c)) { b.re++; if (cubierto(c)) b.reCub++; }
-    return Object.assign(b, { ctas: b.cts.size, pAt: pctDe(b.at, b.n), pNl: pctDe(b.nl, b.n),
-      pNoVol: b.conCt ? 100 - pctDe(b.vol, b.conCt) : null, pCub: pctDe(b.reCub, b.re) });
-  }
-  const R = Object.assign({ desde, hasta, s60 }, tresCortes(bloque));
-
-  // Efectividad por oferta (solo registros con 30 días cumplidos); "Sin oferta" sirve de comparación
-  const of = {};
-  for (const x of s60) {
-    for (const k of (x.sols.length ? x.sols : ['Sin oferta (N/A)'])) {
-      const o = of[k] || (of[k] = { k, n: 0, at: 0, comp: 0, noVol: 0, am: 0 });
-      o.n++;
-      if (x.res === 'Atendida') o.at++;
-      if (x.am) o.am++;
-      if (x.completo && x.ct) { o.comp++; if (!x.volvio) o.noVol++; }
-    }
-  }
-  R.ofertas = Object.values(of).map(o => Object.assign(o, { pAt: pctDe(o.at, o.n), pNoVol: o.comp >= 5 ? pctDe(o.noVol, o.comp) : null }))
-    .sort((a, b) => b.n - a.n);
-
-  // Amenazas de cancelación
-  const ams = s60.filter(x => x.am);
-  const cuenta = (lista, f) => { const g = {}; lista.forEach(x => { const k = f(x); if (k) g[k] = (g[k] || 0) + 1; }); return Object.entries(g).sort((a, b) => b[1] - a[1]); };
-  const amComp = ams.filter(x => x.completo && x.ct);
-  R.amenazas = {
-    n: ams.length, cuentas: new Set(ams.map(x => x.ct).filter(Boolean)).size, folios: ams.reduce((t, x) => t + x.folios, 0),
-    cl: cuenta(ams, x => x.cl), plan: cuenta(ams, x => x.plan), of: cuenta(ams.flatMap(x => x.sols.length ? x.sols : ['Sin oferta (N/A)']).map(k => ({ k })), x => x.k),
-    pVol: amComp.length ? pctDe(amComp.filter(x => x.volvio).length, amComp.length) : null, nComp: amComp.length
+    return [...g.values()].map(x => {
+      const ev = x.n - (x.est['En observación'] || 0);
+      return Object.assign(x, {
+        res: x.est['Resuelta'] || 0, ab: x.est['Abierta'] || 0, rie: x.est['En riesgo'] || 0,
+        vol: (x.est['Volvió a reportar'] || 0) + (x.est['En riesgo'] || 0),
+        pRes: pctDe(x.est['Resuelta'] || 0, ev), ev,
+        diasProm: x.dias.length ? x.dias.reduce((s, v) => s + v, 0) / x.dias.length : null
+      });
+    }).sort((a, b) => b.n - a.n);
   };
-
-  // Productividad por persona
-  const pe = new Map();
-  for (const x of s60) {
-    let p = pe.get(x.quien);
-    if (!p) pe.set(x.quien, p = { k: x.quien, puestos: {}, n: 0, mes: 0, at: 0, nl: 0, am: 0 });
-    if (x.puesto) p.puestos[x.puesto] = (p.puestos[x.puesto] || 0) + 1;
-    p.n++;
-    if (x.dt >= R.meses[1].d1) p.mes++;
-    if (x.res === 'Atendida') p.at++;
-    if (x.res === 'Cliente no localizado') p.nl++;
-    if (x.am) p.am++;
-  }
-  R.personas = [...pe.values()].map(p => Object.assign(p, { puesto: masComun(p.puestos)[0], sem: p.n / (60 / 7), pAt: pctDe(p.at, p.n), pNl: pctDe(p.nl, p.n) }))
-    .sort((a, b) => b.n - a.n);
-
-  // Pendientes de atender
-  const d30 = restarDias(hasta, 29), pend = new Map();
-  for (const [ct, l] of porCuenta) {
-    const rec = l.filter(c => c[0] >= d30 && c[0] <= hasta);
-    if (rec.length < 2) continue;
-    if ((segCta.get(ct) || []).some(x => x.dtReal >= rec[0][0])) continue;
-    pend.set(ct, { ct, motivo: 'Reincidente sin seguimiento', am: false, rec });
-  }
-  for (const [ct, xs] of segCta) {
-    const amUlt = xs.filter(x => x.am).sort((a, b) => b.dtReal.localeCompare(a.dtReal))[0];
-    if (!amUlt) continue;
-    const desp = repDe(ct).filter(c => c[0] > amUlt.dtReal);
-    if (!desp.length) continue;
-    const ultRep = desp[desp.length - 1][0];
-    if (xs.some(x => x.dtReal >= ultRep)) continue;
-    pend.set(ct, { ct, motivo: 'Amenaza de cancelación y volvió a reportar', am: true, rec: repDe(ct).filter(c => c[0] >= d30) });
-  }
-  RC_PEND = [...pend.values()].map(p => {
-    const l = repDe(p.ct), u = l[l.length - 1] || [];
-    return { ct: p.ct, motivo: p.motivo, am: p.am, n30: p.rec.length, ult: u[0] || '', cl: u[4] || '', n2: u[5] || '', est: u[2] || '', plan: planDe(p.ct) || '' };
-  }).sort((a, b) => (b.am - a.am) || b.n30 - a.n30 || b.ult.localeCompare(a.ult));
-  R.pend = RC_PEND;
+  R.porRes = cruce(c => c.res);
+  R.porOferta = cruce(c => c.ofertas.length ? c.ofertas : ['Sin oferta (N/A)'], true);
+  R.porCluster = cruce(c => c.cl);
+  R.porQuien = cruce(c => c.quien);
+  // entre las que volvieron: falla y cierre más comunes
+  const vol = ctas.filter(c => c.despues);
+  const cuenta = f => { const o = {}; vol.forEach(c => { const k = f(c); if (k) o[k] = (o[k] || 0) + 1; }); return masComun(o); };
+  R.volFalla = cuenta(c => c.ultN2);
+  R.volCierre = cuenta(c => c.cie.split(' · ')[0]);
   return R;
 }
 
 function htmlSeguimiento(R) {
-  const T = R.total, [mA, mB] = R.meses, [q1, q2] = R.quincenas;
-  const cN = cambioRC(mB.n, mA.n, 'rel', 'sube');
-  const cAt = cambioRC(mB.pAt, mA.pAt, 'pts', 'sube');
-  const cNl = cambioRC(mB.pNl, mA.pNl, 'pts', 'baja');
-  const cCub = cambioRC(mB.pCub, mA.pCub, 'pts', 'sube');
-  const cVol = cambioRC(q2.pNoVol, q1.pNoVol, 'pts', 'sube');
-  const vs = (c, txt) => c.txt === '—' ? '' : ` (<span class="${c.cls}">${c.txt}</span> ${txt || 'vs mes anterior'})`;
-  const A = R.amenazas, sinOf = R.ofertas.find(o => o.k === 'Sin oferta (N/A)');
-  const ofEval = R.ofertas.filter(o => o.pNoVol != null && o.k !== 'Sin oferta (N/A)');
-  const ofMejor = ofEval.slice().sort((a, b) => b.pNoVol - a.pNoVol)[0];
-  const ofPeor = ofEval.length > 1 ? ofEval.slice().sort((a, b) => a.pNoVol - b.pNoVol)[0] : null;
-  const pers = R.personas.filter(p => p.n >= 10);
-  const perMejor = pers.slice().sort((a, b) => b.pAt - a.pAt)[0];
-  const nAm = R.pend.filter(p => p.am).length;
+  const C = R.ctas, nE = e => (R.estados.find(x => x[0] === e) || [, 0])[1];
+  const tag = e => `<span class="rc-tag" style="background:${colorEstado(e)}1a;color:${colorEstado(e)}">${e}</span>`;
+  const barra = (v, max, color) => `<span class="rc-bc" style="width:${(max ? v / max * 0.9 : 0).toFixed(2)}in;background:${color || '#4a6cf7'}"></span>`;
+  const n = C.length, maxE = Math.max(1, ...R.estados.map(x => x[1]));
+  const ab7 = C.filter(c => c.estado === 'Abierta' && Math.max(c.diasCt || 0, c.diasSeg || 0) > 7).length;
+  const ofEv = R.porOferta.filter(o => o.ev >= 5 && o.k !== 'Sin oferta (N/A)');
+  const ofMejor = ofEv.slice().sort((a, b) => b.pRes - a.pRes)[0];
+  const ofPeor = ofEv.length > 1 ? ofEv.slice().sort((a, b) => a.pRes - b.pRes)[0] : null;
+  const sinOf = R.porOferta.find(o => o.k === 'Sin oferta (N/A)');
+  const clAb = R.porCluster.slice().sort((a, b) => (b.ab + b.rie) - (a.ab + a.rie))[0];
+  const quienes = R.porQuien.filter(q => q.ev >= 5);
+  const qMejor = quienes.slice().sort((a, b) => b.pRes - a.pRes)[0];
+  const qCarga = R.porQuien.slice().sort((a, b) => b.ab - a.ab)[0];
+
+  if (!n) return `<div class="hoja">${cabRC(R, 'Reporte de Seguimiento', 1)}<div class="empty-state" style="color:#6b7085">No hay cuentas con seguimiento registrado en los últimos 60 días.</div></div>`;
 
   const resumen = [
-    `En 60 días se registraron <b>${fmt(T.n)}</b> seguimientos a <b>${fmt(T.ctas)}</b> cuentas; el último mes <b>${fmt(mB.n)}</b>${vs(cN)}.`,
-    `Resultado: <b>${fpct(mB.pAt)}</b> Atendida en el último mes${vs(cAt)}; ${fpct(mB.pNl)} cliente no localizado${vs(cNl)}.`,
-    `Cobertura: <b>${fpct(mB.pCub)}</b> de los reportes reincidentes del último mes tienen seguimiento${vs(cCub)}.`,
-    `Efectividad: <b>${fpct(mA.pNoVol)}</b> de las cuentas con seguimiento no volvieron a reportar en 30 días (mes con ventana completa)${vs(cVol, 'quincena 2 vs 1')}.${ofMejor ? ` La oferta más efectiva es <b>${esc(ofMejor.k)}</b> (${fpct(ofMejor.pNoVol)}${sinOf && sinOf.pNoVol != null ? ` vs ${fpct(sinOf.pNoVol)} sin oferta` : ''}).` : ''}`,
-    `Amenazas de cancelación: <b>${fmt(A.n)}</b> registros (${fmt(A.cuentas)} cuentas${A.folios ? `, ${fmt(A.folios)} folios` : ''})${A.cl[0] ? `, sobre todo en ${esc(A.cl[0][0])} (${fmt(A.cl[0][1])})` : ''}.`,
-    `Pendientes: <b>${fmt(R.pend.length)}</b> cuentas por atender${nAm ? `, ${fmt(nAm)} con amenaza de cancelación que volvieron a reportar` : ''}.`
-  ];
+    `En los últimos 60 días se dio seguimiento a <b>${fmt(n)}</b> cuentas. <b>${fmt(nE('Resuelta'))}</b> están resueltas (${fpct(R.pRes)} de las que ya cumplieron 30 días) y <b>${fmt(nE('En observación'))}</b> siguen en observación.`,
+    `<b>${fmt(nE('Abierta'))}</b> siguen abiertas: ${fmt(R.nCtAb)} con el reporte CTT abierto y ${fmt(R.nSegAb)} con el seguimiento sin concluir (${fmt(R.nAmbas)} con ambos); ${fmt(ab7)} llevan más de 7 días.`,
+    `<b>${fpct(R.pVol)}</b> de las cuentas volvió a reportar después del seguimiento${nE('En riesgo') ? `; <b class="rc-mal">${fmt(nE('En riesgo'))}</b> de ellas tenían amenaza de cancelación (en riesgo)` : ''}.`,
+    ofMejor ? `La oferta con mejor resultado es <b>${esc(ofMejor.k)}</b> (${fpct(ofMejor.pRes)} resueltas${sinOf && sinOf.pRes != null ? ` vs ${fpct(sinOf.pRes)} sin oferta` : ''}).` : '',
+    clAb && (clAb.ab + clAb.rie) ? `Mayor concentración de abiertas y en riesgo: <b>${esc(clAb.k)}</b> (${fmt(clAb.ab + clAb.rie)} cuentas).` : ''
+  ].filter(Boolean);
 
   const logros = [], oport = [];
-  const poner = (c, bien, mal) => { if (c.bien === true) logros.push(bien); else if (c.bien === false) oport.push(mal); };
-  poner(cN, `Más seguimientos registrados: ${fmt(mA.n)} → ${fmt(mB.n)}.`, `Menos seguimientos registrados: ${fmt(mA.n)} → ${fmt(mB.n)}.`);
-  poner(cAt, `Más resultados Atendida: ${fpct(mA.pAt)} → ${fpct(mB.pAt)}.`, `Menos resultados Atendida: ${fpct(mA.pAt)} → ${fpct(mB.pAt)}.`);
-  poner(cNl, `Menos clientes no localizados: ${fpct(mA.pNl)} → ${fpct(mB.pNl)}.`, `Más clientes no localizados: ${fpct(mA.pNl)} → ${fpct(mB.pNl)}.`);
-  poner(cCub, `Mayor cobertura de reincidentes: ${fpct(mA.pCub)} → ${fpct(mB.pCub)}.`, `Menor cobertura de reincidentes: ${fpct(mA.pCub)} → ${fpct(mB.pCub)}.`);
-  poner(cVol, `Más cuentas que no volvieron a reportar: ${fpct(q1.pNoVol)} → ${fpct(q2.pNoVol)} (quincena 1 → 2).`, `Menos cuentas que no volvieron a reportar: ${fpct(q1.pNoVol)} → ${fpct(q2.pNoVol)} (quincena 1 → 2).`);
-  if (ofMejor) logros.push(`“${esc(ofMejor.k)}” es la oferta más efectiva: ${fpct(ofMejor.pNoVol)} no volvió a reportar.`);
-  if (perMejor) logros.push(`${esc(perMejor.k)}: ${fpct(perMejor.pAt)} de sus ${fmt(perMejor.n)} seguimientos con resultado Atendida.`);
-  if (ofPeor) oport.push(`“${esc(ofPeor.k)}” es la oferta menos efectiva: ${fpct(ofPeor.pNoVol)} no volvió a reportar.`);
-  if (A.pVol != null) oport.push(`${fpct(A.pVol)} de las cuentas con amenaza volvieron a reportar en 30 días.`);
-  if (R.pend.length) oport.push(`${fmt(R.pend.length)} cuentas reincidentes o con amenaza siguen sin seguimiento.`);
-  if (!logros.length) logros.push('Sin mejoras significativas contra el periodo anterior.');
-  if (!oport.length) oport.push('Sin retrocesos significativos contra el periodo anterior.');
+  if (nE('Resuelta')) logros.push(`${fmt(nE('Resuelta'))} cuentas resueltas sin volver a reportar (${fpct(R.pRes)}).`);
+  if (ofMejor) logros.push(`“${esc(ofMejor.k)}” resuelve ${fpct(ofMejor.pRes)} de las cuentas.`);
+  if (qMejor) logros.push(`${esc(qMejor.k)}: ${fpct(qMejor.pRes)} de sus cuentas resueltas.`);
+  const atendCerradas = C.filter(c => !c.ctAb && !c.segAb).length;
+  if (atendCerradas) logros.push(`${fmt(atendCerradas)} cuentas con reporte cerrado y seguimiento Atendida.`);
+  if (nE('En riesgo')) oport.push(`${fmt(nE('En riesgo'))} cuentas con amenaza de cancelación volvieron a reportar.`);
+  if (ab7) oport.push(`${fmt(ab7)} cuentas abiertas con más de 7 días.`);
+  if (R.nNl) oport.push(`${fmt(R.nNl)} seguimientos quedaron en “cliente no localizado”.`);
+  if (ofPeor) oport.push(`“${esc(ofPeor.k)}” solo resuelve ${fpct(ofPeor.pRes)}.`);
+  if (R.volFalla[0]) oport.push(`Entre las que volvieron, la falla más común es ${esc(R.volFalla[0])} (${fmt(R.volFalla[1])}).`);
+  if (!logros.length) logros.push('Aún no hay cuentas con 30 días cumplidos para medir resultados.');
+  if (!oport.length) oport.push('Sin pendientes relevantes.');
 
   const prop = [];
-  prop.push(`<b>Atender la lista de pendientes en 24–48 h.</b> ${fmt(R.pend.length)} cuentas (anexo y CSV): primero las ${fmt(nAm)} con amenaza que volvieron a reportar, luego las de más reportes. Repartir diario por persona, equilibrando la carga, y revisar avance en la junta de la mañana.`);
-  prop.push(`<b>Contactar a toda cuenta reincidente</b> (hoy ${fpct(T.pCub)} de cobertura). Llamada de verificación 48–72 h después de la visita; el contacto posterior al soporte es de los de mayor impacto en retención.`);
-  if (T.pNl != null && T.pNl >= 10) prop.push(`<b>Bajar “cliente no localizado”</b> (${fpct(T.pNl)}). Hasta 3 intentos en horarios distintos y WhatsApp/SMS antes de marcar no localizado.`);
-  if (ofMejor) prop.push(`<b>Priorizar las ofertas que funcionan.</b> “${esc(ofMejor.k)}” deja ${fpct(ofMejor.pNoVol)} sin nuevo reporte${ofPeor ? `, contra ${fpct(ofPeor.pNoVol)} de “${esc(ofPeor.k)}”` : ''}. El descuento no debe ser la primera opción: enseña al cliente a amenazar para obtener beneficios.`);
-  if (A.n) prop.push(`<b>Protocolo de amenaza de cancelación.</b> ${fmt(A.cuentas)} cuentas: escalar a retención el mismo día y revisión técnica preventiva${A.cl[0] ? ` (sobre todo ${esc(A.cl[0][0])})` : ''}; volver a contactar a los 7 y 30 días.`);
+  if (nE('Abierta')) prop.push(`<b>Cerrar las ${fmt(nE('Abierta'))} cuentas abiertas.</b> Responsable y fecha compromiso por cuenta, revisión diaria y regla de que ningún seguimiento pase de 7 días sin concluir (hoy ${fmt(ab7)})${qCarga && qCarga.ab ? `; ${esc(qCarga.k)} tiene la mayor carga (${fmt(qCarga.ab)})` : ''}.`);
+  if (nE('En riesgo')) prop.push(`<b>Atender hoy las ${fmt(nE('En riesgo'))} cuentas en riesgo.</b> Escalar a retención y mandar técnico senior con validación de potencia; volver a llamar a los 7 y 30 días.`);
+  if (R.nNl) prop.push(`<b>Recuperar a los ${fmt(R.nNl)} no localizados.</b> Hasta 3 intentos en horarios distintos y WhatsApp/SMS en 72 h; si no contesta, visita programada.`);
+  if (C.some(c => c.despues)) prop.push(`<b>Revisar el cierre técnico de las que volvieron.</b>${R.volCierre[0] ? ` El cierre más común entre ellas es “${esc(R.volCierre[0])}”;` : ''} revisar si la solución atacó la causa y escalar a planta cuando se repite.`);
+  if (ofMejor) prop.push(`<b>Priorizar lo que funciona.</b> “${esc(ofMejor.k)}” resuelve ${fpct(ofMejor.pRes)}${ofPeor ? ` contra ${fpct(ofPeor.pRes)} de “${esc(ofPeor.k)}”` : ''}. El descuento no debe ser la primera opción: enseña al cliente a amenazar para obtener beneficios.`);
 
-  const colsB = [
-    ['Registros', b => fmt(b.n)],
-    ['Cuentas', b => fmt(b.ctas)],
-    ['% Atendida', b => fpct(b.pAt)],
-    ['% No local.', b => fpct(b.pNl)],
-    ['Cobert. reinc.', b => fpct(b.pCub)],
-    ['No volvió 30d', b => fpct(b.pNoVol) + (b.enCurso && b.conCt ? '*' : '')],
-    ['Amenazas', b => fmt(b.am)]
-  ];
-  const filasPer = R.personas.slice(0, 8).map(p => `<tr><td title="${attr(p.k)}">${esc(p.k)}</td><td title="${attr(p.puesto)}">${esc(p.puesto || '—')}</td><td class="num">${fmt(p.n)}</td><td class="num">${fmt(p.mes)}</td><td class="num">${p.sem.toFixed(1)}</td><td class="num">${fpct(p.pAt)}</td><td class="num">${fpct(p.pNl)}</td><td class="num">${fmt(p.am)}</td></tr>`).join('');
-  const filasOf = R.ofertas.slice(0, 8).map(o => `<tr><td title="${attr(o.k)}">${esc(o.k)}</td><td class="num">${fmt(o.n)}</td><td class="num">${fpct(o.pAt)}</td><td class="num">${o.pNoVol == null ? '—' : fpct(o.pNoVol) + ` <span style="color:#6b7085">(${fmt(o.comp)})</span>`}</td></tr>`).join('');
-  const top = (arr, n) => arr.slice(0, n).map(([k, v]) => `${esc(k)} ${fmt(v)}`).join(' · ') || '—';
-  const filasPend = R.pend.slice(0, 15).map(p => `<tr><td>${esc(p.ct)}</td><td style="max-width:1.6in" title="${attr(p.motivo)}">${p.am ? '<b class="rc-mal">Amenaza + volvió</b>' : 'Reincidente'}</td><td>${esc(p.cl || '—')}</td><td class="num">${fmt(p.n30)}</td><td>${esc(p.ult)}</td><td title="${attr(p.n2)}" style="max-width:1.5in">${esc(p.n2 || '—')}</td><td>${esc(p.est || '—')}</td></tr>`).join('');
+  const fEst = R.estados.map(([e, v]) => `<tr><td>${tag(e)}</td><td class="num">${fmt(v)}</td><td class="num">${fpct(pctDe(v, n))}</td><td>${barra(v, maxE, colorEstado(e))}</td></tr>`).join('');
+  const fAnt = R.antCt.map(([l, v], i) => `<tr><td>${l}</td><td class="num">${fmt(v)}</td><td class="num">${fmt(R.antSeg[i][1])}</td></tr>`).join('');
+  const colsEst = ESTADOS_SEG.map(x => x[0]);
+  const fRes = R.porRes.map(x => `<tr><td>${esc(x.k)}</td><td class="num">${fmt(x.n)}</td>${colsEst.map(e => `<td class="num">${x.est[e] ? fmt(x.est[e]) : '·'}</td>`).join('')}</tr>`).join('');
+  const fOf = R.porOferta.slice(0, 7).map(x => `<tr><td title="${attr(x.k)}">${esc(x.k)}</td><td class="num">${fmt(x.n)}</td><td class="num">${fpct(x.pRes)}</td><td class="num">${fmt(x.vol)}</td><td class="num">${fmt(x.ab)}</td></tr>`).join('');
+  const fCl = R.porCluster.slice(0, 7).map(x => `<tr><td title="${attr(x.k)}">${esc(x.k)}</td><td class="num">${fmt(x.n)}</td><td class="num">${fmt(x.ab)}</td><td class="num">${fmt(x.vol)}</td><td class="num">${fmt(x.rie)}</td></tr>`).join('');
+  const fQ = R.porQuien.slice(0, 7).map(x => `<tr><td title="${attr(x.k)}">${esc(x.k)}</td><td class="num">${fmt(x.n)}</td><td class="num">${fpct(x.pRes)}</td><td class="num">${fmt(x.ab)}</td><td class="num">${x.diasProm == null ? '—' : x.diasProm.toFixed(1)}</td><td class="num">${fmt(x.rie)}</td></tr>`).join('');
+
+  // hasta 5 en riesgo y luego abiertas (las más antiguas primero) y las que volvieron
+  const deEstado = e => C.filter(c => c.estado === e);
+  const top = deEstado('En riesgo').slice(0, 5).concat(deEstado('Abierta'), deEstado('Volvió a reportar')).slice(0, 13);
+  const corto = (t, m) => t.length > m ? t.slice(0, m - 1) + '…' : t;
+  const fCtas = top.map(c => {
+    const dias = [c.diasCt != null ? `CTT ${c.diasCt} d` : '', c.diasSeg != null ? `seg. ${c.diasSeg} d` : ''].filter(Boolean).join(' · ');
+    const linea = [
+      `Seg. ${ddmm(c.fSeg)}${c.nSeg > 1 ? ` (${c.nSeg})` : ''}: <b>${esc(c.res)}</b>`,
+      c.sols.length ? esc(corto(c.sols.join(' / '), 70)) : 'sin oferta',
+      c.am ? `<b class="rc-mal">amenaza${c.folios ? ' ' + c.folios + ' folios' : ''}</b>` : '',
+      `${c.antes} rep. antes · ${c.despues} después${c.osNuevas ? ` (${c.osNuevas} OS nueva${c.osNuevas > 1 ? 's' : ''})` : ''}`,
+      c.tec ? `Téc. ${esc(corto(c.tec, 28))}` : '',
+      c.cie ? `cierre ${esc(corto(c.cie, 55))}` : '',
+      c.com ? `“${esc(corto(c.com, 80))}”` : ''
+    ].filter(Boolean).join(' · ');
+    return `<tr class="pri"><td><b>${esc(c.ct)}</b></td><td>${tag(c.estado)}</td><td title="${attr(c.cl)}">${esc(c.cl || '—')}</td><td title="${attr(c.plan)}" style="max-width:1.3in">${esc(c.plan || '—')}</td><td>${esc(c.ultE || '—')} ${c.ultF ? ddmm(c.ultF) : ''}</td><td>${dias || '—'}</td><td title="${attr(c.quien)}" style="max-width:1.1in">${esc(c.quien)}</td></tr>
+      <tr class="det"><td colspan="7">${linea}</td></tr>`;
+  }).join('');
 
   const hoja1 = `<div class="hoja">${cabRC(R, 'Reporte de Seguimiento', 1)}
     <div class="rc-sec"><h2>Resumen ejecutivo</h2>${listaRC(resumen)}</div>
-    <div class="rc-sec"><h2>Indicadores 60 días <small>· cambio = último mes vs anterior (no volvió: quincena 2 vs 1)</small></h2>
-      <div class="rc-kpis">
-        ${kpiRC('Seguimientos', fmt(T.n), cN, '')}
-        ${kpiRC('Cuentas con seguimiento', fmt(T.ctas), null, '')}
-        ${kpiRC('% Atendida', fpct(T.pAt), cAt, '')}
-        ${kpiRC('Cobertura de reincidentes', fpct(T.pCub), cCub, '')}
-        ${kpiRC('No volvió a reportar 30d', fpct(mA.pNoVol), cVol, 'mes 1')}
-        ${kpiRC('Amenazas de cancelación', fmt(A.n), null, A.folios ? fmt(A.folios) + ' folios' : '')}
-      </div></div>
-    <div class="rc-sec"><h2>Avance semanal <small>· 8 semanas de 7 días (últimos 56 días)</small></h2>${tablaRC(R.semanas, 'Sem', colsB)}</div>
-    <div class="rc-sec"><h2>Avance quincenal <small>· 4 quincenas de 15 días</small></h2>${tablaRC(R.quincenas, 'Q', colsB)}</div>
-    <div class="rc-sec"><h2>Avance mensual <small>· 2 bloques de 30 días</small></h2>${tablaRC(R.meses, 'Mes', colsB)}</div>
-    <div class="rc-sec"><h2>Productividad por persona <small>· 60 días</small></h2>
-      <table class="rc-t"><thead><tr><th>Quién reporta</th><th>Puesto</th><th class="num">Registros</th><th class="num">Último mes</th><th class="num">Por semana</th><th class="num">% Atendida</th><th class="num">% No local.</th><th class="num">Amenazas</th></tr></thead>
-      <tbody>${filasPer || vacioRC(8, 'Sin registros de seguimiento')}</tbody></table></div>
-    <div class="rc-pie">Los registros se fechan por su marca de tiempo; lo capturado después del último dato de BD CTT cuenta en el bloque más reciente. <b>Cobert. reinc.</b>: % de reportes reincidentes (la cuenta ya había reportado en los 30 días previos) cuya cuenta tiene un seguimiento registrado ese día o después. <b>No volvió 30d</b>: % de registros cuya cuenta no tuvo otro reporte CTT en los 30 días siguientes (* ventana en curso, el dato puede bajar).</div>
+    <div class="rc-sec"><div class="rc-kpis">
+      ${kpiRC('Cuentas con seguimiento', fmt(n), null, '60 días')}
+      ${kpiRC('Resueltas', fpct(R.pRes), null, fmt(nE('Resuelta')) + ' de ' + fmt(R.evaluables) + ' con 30 días')}
+      ${kpiRC('Reporte CTT abierto', fmt(R.nCtAb), null, 'cuentas')}
+      ${kpiRC('Seguimiento sin concluir', fmt(R.nSegAb), null, 'no Atendida')}
+      ${kpiRC('Volvieron a reportar', fpct(R.pVol), null, fmt(C.filter(c => c.despues).length) + ' cuentas')}
+      ${kpiRC('En riesgo', fmt(nE('En riesgo')), null, 'amenaza + volvió')}
+    </div></div>
+    <div class="rc-sec" style="display:grid;grid-template-columns:3fr 2fr;gap:.18in">
+      <div><h2>¿Qué pasó con las cuentas?</h2>
+        <table class="rc-t"><thead><tr><th>Estado</th><th class="num">Cuentas</th><th class="num">%</th><th></th></tr></thead><tbody>${fEst}</tbody></table></div>
+      <div><h2>Antigüedad de lo abierto</h2>
+        <table class="rc-t"><thead><tr><th>Días</th><th class="num">Rep. CTT</th><th class="num">Seguim.</th></tr></thead><tbody>${fAnt}</tbody></table></div>
+    </div>
+    <div class="rc-sec"><h2>Resultado del seguimiento → qué pasó después <small>· cuentas, por su último seguimiento</small></h2>
+      <table class="rc-t"><thead><tr><th>Resultado</th><th class="num">Cuentas</th>${colsEst.map(e => `<th class="num">${e}</th>`).join('')}</tr></thead><tbody>${fRes}</tbody></table></div>
+    <div class="rc-g2 rc-sec">
+      <div><h2>Por oferta</h2>
+        <table class="rc-t"><thead><tr><th>Solución / oferta</th><th class="num">Ctas</th><th class="num">Resueltas</th><th class="num">Volvió</th><th class="num">Abiertas</th></tr></thead><tbody>${fOf}</tbody></table></div>
+      <div><h2>Por cluster</h2>
+        <table class="rc-t"><thead><tr><th>Cluster</th><th class="num">Ctas</th><th class="num">Abiertas</th><th class="num">Volvió</th><th class="num">Riesgo</th></tr></thead><tbody>${fCl || vacioRC(5, 'Sin cluster')}</tbody></table></div>
+    </div>
+    <div class="rc-sec"><h2>Por responsable <small>· quién dio el último seguimiento</small></h2>
+      <table class="rc-t"><thead><tr><th>Quién reporta</th><th class="num">Cuentas</th><th class="num">Resueltas</th><th class="num">Abiertas</th><th class="num">Días prom. abiertas</th><th class="num">En riesgo</th></tr></thead><tbody>${fQ}</tbody></table></div>
+    <div class="rc-pie"><b>Abierta</b>: el último reporte CTT de la cuenta sigue abierto (no Cerrado ni Cancelado) o su último seguimiento no es Atendida. <b>En riesgo</b>: tuvo amenaza de cancelación y volvió a reportar. <b>Volvió a reportar</b>: tuvo otro reporte CTT después de su primer seguimiento. <b>En observación</b>: Atendida y sin nuevo reporte, pero aún no pasan 30 días. <b>Resueltas</b> se mide sobre las cuentas que ya cumplieron 30 días. Días contados hasta ${ddmm(R.ref)}/${R.ref.slice(0, 4)}. Cada cuenta cuenta en cada oferta que recibió.</div>
   </div>`;
 
   const hoja2 = `<div class="hoja">${cabRC(R, 'Reporte de Seguimiento', 2)}
     <div class="rc-g2 rc-sec">
-      <div class="rc-box ok"><h3 class="rc-ok">Avances y logros</h3>${listaRC(logros.slice(0, 5))}</div>
-      <div class="rc-box mal"><h3 class="rc-mal">Áreas de oportunidad</h3>${listaRC(oport.slice(0, 5))}</div>
+      <div class="rc-box ok"><h3 class="rc-ok">Avances y logros</h3>${listaRC(logros.slice(0, 4))}</div>
+      <div class="rc-box mal"><h3 class="rc-mal">Áreas de oportunidad</h3>${listaRC(oport.slice(0, 4))}</div>
     </div>
-    <div class="rc-g2 rc-sec">
-      <div><h2>Efectividad de la oferta <small>· 60 días</small></h2>
-        <table class="rc-t"><thead><tr><th>Solución / oferta</th><th class="num">Reg.</th><th class="num">% Atend.</th><th class="num">No volvió (n)</th></tr></thead>
-        <tbody>${filasOf || vacioRC(4, 'Sin registros')}</tbody></table></div>
-      <div><h2>Amenazas de cancelación</h2>
-        <div style="font-size:7.8pt;line-height:1.5">
-          <b>${fmt(A.n)}</b> registros · ${fmt(A.cuentas)} cuentas${A.folios ? ` · ${fmt(A.folios)} folios` : ''}<br>
-          <b>Por cluster:</b> ${top(A.cl, 4)}<br>
-          <b>Por plan:</b> ${top(A.plan, 3)}<br>
-          <b>Oferta usada:</b> ${top(A.of, 3)}<br>
-          <b>Volvieron a reportar en 30 días:</b> ${A.pVol == null ? 'aún sin ventana completa' : `${fpct(A.pVol)} (de ${fmt(A.nComp)} con 30 días cumplidos)`}
-        </div></div>
-    </div>
-    <div class="rc-sec"><h2>Cuentas pendientes de atender <small>· ${fmt(R.pend.length)} en total; aquí las 15 más urgentes, la lista completa en el CSV</small></h2>
-      <table class="rc-t"><thead><tr><th>Cuenta</th><th>Motivo</th><th>Cluster</th><th class="num">Rep. 30d</th><th>Último reporte</th><th>Última falla</th><th>Estatus</th></tr></thead>
-      <tbody>${filasPend || vacioRC(7, 'Sin cuentas pendientes')}</tbody></table></div>
+    <div class="rc-sec"><h2>Cuentas que requieren atención <small>· ${fmt(top.length)} de ${fmt(C.filter(c => c.estado !== 'Resuelta' && c.estado !== 'En observación').length)}: hasta 5 en riesgo, luego abiertas (más antiguas primero) y las que volvieron; todas en el CSV</small></h2>
+      <table class="rc-t rc-ctas"><thead><tr><th>Cuenta</th><th>Estado</th><th>Cluster</th><th>Plan</th><th>Último rep. CTT</th><th>Abierta</th><th>Responsable</th></tr></thead>
+      <tbody>${fCtas || vacioRC(7, 'Ninguna cuenta requiere atención')}</tbody></table></div>
     <div class="rc-sec"><h2>Propuestas de solución</h2>${listaRC(prop, true)}</div>
-    <div class="rc-pie"><b>No volvió (n)</b>: solo registros con 30 días cumplidos (n = cuántos); con menos de 5 no se calcula. Cada registro cuenta en su Solución 1 y 2. <b>Pendientes</b>: cuentas con 2+ reportes en los últimos 30 días sin seguimiento posterior al primero de ellos, y cuentas con amenaza de cancelación que volvieron a reportar sin nuevo seguimiento. Referencias del sector: contacto posterior al soporte, detección temprana de cuentas con varios reportes y medir cada oferta por lo que pasa con la cuenta después.</div>
+    <div class="rc-pie">Referencias del sector: el contacto posterior al soporte y la atención temprana de cuentas con varios reportes son las prácticas más citadas para reducir cancelaciones; cada oferta se mide por lo que pasa con la cuenta después, no por haberla ofrecido.</div>
   </div>`;
   return hoja1 + hoja2;
 }
@@ -3043,7 +3067,7 @@ function abrirReporte(tipo) {
   }
   repActual = tipo;
   document.getElementById('rcTitulo').textContent = r.t;
-  document.getElementById('rcCsv').style.display = tipo === 'seguimiento' && RC_PEND.length ? '' : 'none';
+  document.getElementById('rcCsv').style.display = tipo === 'seguimiento' && RC_CTAS.length ? '' : 'none';
   document.getElementById('repCom').classList.add('show');
   document.getElementById('repCom').scrollTop = 0;
   document.body.classList.add('rc-abierto');
@@ -3091,10 +3115,17 @@ document.addEventListener('keydown', e => {
   if (document.body.classList.contains('rc-abierto') && !e.target.isContentEditable) cerrarReporte();
 });
 document.getElementById('rcCsv').addEventListener('click', () => {
-  descargarCSV('pendientes_seguimiento_' + new Date().toISOString().slice(0, 10) + '.csv',
-    [['Prioridad', 'Cuenta', 'Motivo', 'Cluster', 'Plan', 'Reportes 30 días', 'Último reporte', 'Última falla N2', 'Estatus último reporte']]
-      .concat(RC_PEND.map((p, i) => [i + 1, p.ct, p.motivo, p.cl, p.plan, p.n30, p.ult, p.n2, p.est])));
-  toast(fmt(RC_PEND.length) + ' cuentas exportadas');
+  descargarCSV('cuentas_seguimiento_' + new Date().toISOString().slice(0, 10) + '.csv',
+    [['Prioridad', 'Cuenta', 'Estado', 'Cliente', 'Cluster', 'Plan', 'Responsable', 'Puesto', 'Fecha primer seguimiento', 'Fecha último seguimiento',
+      'Seguimientos', 'Resultado', 'Solución / oferta', 'Amenaza de cancelación', 'Folios amenaza', 'Comentario',
+      'Reporte CTT abierto', 'Días reporte abierto', 'Seguimiento sin concluir', 'Días sin concluir',
+      'Reportes antes', 'Reportes después', 'OS nuevas después', 'Último reporte', 'Estatus último reporte', 'Última falla N2',
+      'Fallas de la cuenta', 'Última OS', 'Técnico', 'Cierre (falla → solución · potencia)']]
+      .concat(RC_CTAS.map((c, i) => [i + 1, c.ct, c.estado, c.cliente, c.cl, c.plan, c.quien, c.puesto, c.fIni, c.fSeg,
+        c.nSeg, c.res, c.sols.join(' / '), c.am ? 'SI' : 'NO', c.folios || '', c.com,
+        c.ctAb ? 'SI' : 'NO', c.diasCt ?? '', c.segAb ? 'SI' : 'NO', c.diasSeg ?? '',
+        c.antes, c.despues, c.osNuevas, c.ultF, c.ultE, c.ultN2, c.fallas.join(' / '), c.os, c.tec, c.cie])));
+  toast(fmt(RC_CTAS.length) + ' cuentas exportadas');
 });
 document.getElementById('rcImprimir').addEventListener('click', () => {
   // el título sugiere el nombre del PDF
