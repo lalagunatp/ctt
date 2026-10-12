@@ -8,7 +8,12 @@
 <link rel="icon" href="icons/icon-192.png">
 <link rel="apple-touch-icon" href="icons/icon-192.png">
 <meta name="theme-color" content="#0f1117">
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<!-- abrir la conexión con el Apps Script (y su redirect) mientras carga la página -->
+<link rel="preconnect" href="https://script.google.com">
+<link rel="preconnect" href="https://script.googleusercontent.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<!-- la fuente no detiene el primer pintado: se aplica cuando llega -->
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
 <style>
 :root{
   --bg:#0f1117;--sf:#1a1d27;--sf2:#232736;--bd:#2d3148;
@@ -526,19 +531,53 @@ document.querySelectorAll('.tab').forEach(t => {
 let TOKEN = '';
 let PERFIL = null;      // {numero, nombre, puesto}
 
+// La sesión se guarda en localStorage: sobrevive a cerrar la app y dura lo
+// que diga el servidor (12 h). El botón Salir la borra.
+const SESION_MS_DEFAULT = 6 * 3600 * 1000;   // Apps Script de antes (tokens sin vencimiento)
 function sesionGuardada() {
-  try { return JSON.parse(sessionStorage.getItem('ctt_sesion') || 'null'); } catch(e) { return null; }
+  try {
+    const s = JSON.parse(localStorage.getItem('ctt_sesion') || 'null');
+    return (s && s.token && s.perfil && s.exp > Date.now() + 60000) ? s : null;
+  } catch(e) { return null; }
 }
 
-function guardarSesion() {
-  try { sessionStorage.setItem('ctt_sesion', JSON.stringify({ token: TOKEN, perfil: PERFIL })); } catch(e) {}
+function guardarSesion(exp) {
+  try {
+    localStorage.setItem('ctt_sesion', JSON.stringify({ token: TOKEN, perfil: PERFIL, exp: exp || (Date.now() + SESION_MS_DEFAULT) }));
+  } catch(e) {}
 }
+
+function borrarSesion() {
+  try { localStorage.removeItem('ctt_sesion'); } catch(e) {}
+}
+
+// Llave/valor en IndexedDB: guarda objetos tal cual (sin JSON.stringify) y
+// no tiene el límite de ~5 MB de localStorage. Si falla, solo se pierde la
+// carga instantánea.
+const IDB = (() => {
+  let db = null;
+  const abrir = () => db || (db = new Promise((res, rej) => {
+    const r = indexedDB.open('ctt', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('kv');
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  }));
+  const tx = (modo, fn) => abrir().then(d => new Promise((res, rej) => {
+    const t = d.transaction('kv', modo);
+    const r = fn(t.objectStore('kv'));
+    t.oncomplete = () => res(r.result);
+    t.onerror = t.onabort = () => rej(t.error);
+  }));
+  return {
+    get: k => tx('readonly', s => s.get(k)).catch(() => null),
+    set: (k, v) => tx('readwrite', s => s.put(v, k)).catch(() => {}),
+    del: k => tx('readwrite', s => s.delete(k)).catch(() => {})
+  };
+})();
 
 // Caché de la última carga completa (dashboard, seguimiento, planes y
 // últimas cargas) para pintar todo al instante al entrar y luego
-// refrescar en segundo plano. Se guarda en localStorage (persiste entre
-// aperturas de la app) atado al número de empleado; si el payload no cabe,
-// el try/catch lo ignora y solo se pierde la carga instantánea.
+// refrescar en segundo plano. Va en IndexedDB atado al número de empleado.
 // Abiertos/canceladas se guardan como índices (D.ab / D.cx), no expandidos.
 let ULT = null;         // respuesta de ultimasCargas
 let PLANES_RAW = null;  // respuesta de planes, tal cual (comprimida)
@@ -546,20 +585,18 @@ function guardarCache() {
   try {
     if (!D || !PERFIL) return;
     const compacto = Array.isArray(D.ab) ? Object.assign({}, D, { abiertos: undefined, canceladas_detail: undefined }) : D;
-    localStorage.setItem('ctt_cache', JSON.stringify({
-      numero: PERFIL.numero, ts: Date.now(), D: compacto, seg: segData, planes: PLANES_RAW, ult: ULT
-    }));
+    IDB.set('cache', { numero: PERFIL.numero, ts: Date.now(), D: compacto, seg: segData, planes: PLANES_RAW, ult: ULT });
   } catch(e) {}
 }
-function cacheGuardado() {
-  try {
-    const c = JSON.parse(localStorage.getItem('ctt_cache') || 'null');
-    return (c && c.D && PERFIL && c.numero === PERFIL.numero) ? c : null;
-  } catch(e) { return null; }
+async function cacheGuardado() {
+  const c = await IDB.get('cache');
+  return (c && c.D && PERFIL && c.numero === PERFIL.numero) ? c : null;
 }
 function borrarCache() {
-  try { localStorage.removeItem('ctt_cache'); } catch(e) {}
+  IDB.del('cache');
 }
+// la caché y la sesión de antes (localStorage / sessionStorage) ya no se usan
+try { localStorage.removeItem('ctt_cache'); sessionStorage.removeItem('ctt_sesion'); } catch(e) {}
 
 const espera = ms => new Promise(r => setTimeout(r, ms));
 
@@ -634,7 +671,7 @@ function salir(msg) {
   PLANES_RAW = null;
   ULT = null;
   isLive = false;
-  try { sessionStorage.removeItem('ctt_sesion'); } catch(e) {}
+  borrarSesion();
   borrarCache();
   document.getElementById('tabSubir').style.display = 'none';
   if (document.getElementById('subir').classList.contains('active')) {
@@ -657,7 +694,8 @@ async function entrar() {
   document.getElementById('accEntrar').disabled = true;
   aviso.textContent = 'Validando…';
   try {
-    const r = await apiPost({ action: 'login', numero: numero, pin: pin }, true);
+    // datos: true = el login regresa también los datos (una sola llamada)
+    const r = await apiPost({ action: 'login', numero: numero, pin: pin, datos: true }, true);
     if (!r.ok || !r.token) {
       aviso.textContent = r.error || 'El servidor no reconoce el acceso con PIN (falta actualizar el Apps Script).';
       document.getElementById('accEntrar').disabled = false;
@@ -665,15 +703,16 @@ async function entrar() {
     }
     TOKEN = r.token;
     PERFIL = r.perfil;
-    guardarSesion();
-    abrirApp();
+    guardarSesion(r.exp);
+    abrirApp(r.todo);
   } catch (err) {
     aviso.textContent = 'No se pudo validar: ' + err.message;
     document.getElementById('accEntrar').disabled = false;
   }
 }
 
-async function abrirApp() {
+// todoInicial = datos que ya llegaron con el login (si el servidor los manda)
+async function abrirApp(todoInicial) {
   document.getElementById('acceso').style.display = 'none';
   document.getElementById('quienNombre').textContent = PERFIL.nombre + ' · ' + PERFIL.puesto;
   document.getElementById('quien').style.display = '';
@@ -682,15 +721,18 @@ async function abrirApp() {
   document.getElementById('tabSubir').style.display = subeCierre ? '' : 'none';
   document.getElementById('cardCtt').style.display = PERFIL.carga ? '' : 'none';
   document.getElementById('mainContent').style.display = 'block';
-  // Pinta al instante lo último guardado (si hay) mientras llega lo
-  // fresco: la app se ve completa de inmediato en vez de esperar la carga.
-  const c = cacheGuardado();
-  if (c) {
+  if (todoInicial && todoInicial.ok) { await cargarDatos(Promise.resolve(todoInicial)); return; }
+  // Lo fresco se pide desde ya y, mientras llega, se pinta lo último
+  // guardado (si hay): la app se ve completa de inmediato.
+  const pedido = pedirTodo();
+  pedido.catch(() => {});
+  cacheGuardado().then(c => {
+    if (!c || isLive || !TOKEN) return;   // ya llegó lo fresco o se salió
     try { aplicarTodo({ dashboard: c.D, seguimiento: c.seg ? { rows: c.seg } : null, planes: c.planes, ultimasCargas: c.ult }); } catch(e) {}
     document.getElementById('connDot').className = 'conn-dot load';
     document.getElementById('connLabel').textContent = 'Actualizando…';
-  }
-  await cargarDatos();
+  });
+  await cargarDatos(pedido);
 }
 
 // Abiertos y canceladas llegan como [índice en casos, seguimiento, registros]
@@ -744,11 +786,12 @@ async function pedirTodo() {
   return { dashboard, seguimiento, planes, ultimasCargas };
 }
 
-async function cargarDatos() {
+// pedido = una llamada ya en camino (al abrir); si no, se hace aquí
+async function cargarDatos(pedido) {
   document.getElementById('connDot').className = 'conn-dot load';
   if (!D) document.getElementById('connLabel').textContent = 'Conectando...';
   try {
-    const t = await pedirTodo();
+    const t = await (pedido || pedirTodo());
     isLive = true;
     aplicarTodo(t);
     guardarCache();
