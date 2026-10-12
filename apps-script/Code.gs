@@ -79,7 +79,7 @@ const PUESTOS_CARGA_CIERRE = [
   'SUPERVISOR DE PLANTA INTERNA'
 ];
 
-const SESION_SEG  = 21600;                 // la sesión dura 6 horas
+const SESION_SEG  = 43200;                 // la sesión dura 12 horas
 const MAX_FALLOS  = 5;                      // intentos de PIN antes de bloquear
 const BLOQUEO_SEG = 900;                    // 15 minutos de bloqueo
 
@@ -170,16 +170,56 @@ function login_(numero, pin) {
     carga: puestoEn_(persona.puesto, PUESTOS_CARGA),
     cargaCierre: puestoEn_(persona.puesto, PUESTOS_CARGA) || puestoEn_(persona.puesto, PUESTOS_CARGA_CIERRE)
   };
-  const token = Utilities.getUuid();
-  cache.put('tok_' + token, JSON.stringify(perfil), SESION_SEG);
-  return { ok: true, token: token, perfil: perfil };
+  const exp = Date.now() + SESION_SEG * 1000;
+  return { ok: true, token: crearToken_(perfil, exp), perfil: perfil, exp: exp };
+}
+
+// El token lleva el perfil y su vencimiento, firmado con una clave que solo
+// conoce el script (Script Properties). Así dura 12 h (la caché solo
+// guarda hasta 6) y validarlo no consulta nada más.
+function secretoToken_() {
+  if (secretoToken_.v) return secretoToken_.v;
+  const props = PropertiesService.getScriptProperties();
+  let s = props.getProperty('secreto_token');
+  if (!s) {
+    // que dos logins al mismo tiempo no creen claves distintas
+    const lock = LockService.getScriptLock();
+    lock.waitLock(10000);
+    try {
+      s = props.getProperty('secreto_token');
+      if (!s) { s = Utilities.getUuid() + Utilities.getUuid(); props.setProperty('secreto_token', s); }
+    } finally { lock.releaseLock(); }
+  }
+  return (secretoToken_.v = s);
+}
+
+function firmar_(txt) {
+  return Utilities.base64EncodeWebSafe(Utilities.computeHmacSha256Signature(txt, secretoToken_()));
+}
+
+function crearToken_(perfil, exp) {
+  const cuerpo = Utilities.base64EncodeWebSafe(JSON.stringify({ p: perfil, exp: exp }), Utilities.Charset.UTF_8);
+  return cuerpo + '.' + firmar_(cuerpo);
 }
 
 // Devuelve el perfil de la sesión, o null si el token no sirve o ya expiró
 function perfilDe_(token) {
   if (!token) return null;
-  const datos = CacheService.getScriptCache().get('tok_' + token);
-  return datos ? JSON.parse(datos) : null;
+  const t = String(token);
+  const punto = t.indexOf('.');
+  if (punto < 0) {
+    // tokens de antes (guardados en la caché), mientras vencen
+    const datos = CacheService.getScriptCache().get('tok_' + t);
+    return datos ? JSON.parse(datos) : null;
+  }
+  const cuerpo = t.slice(0, punto);
+  if (firmar_(cuerpo) !== t.slice(punto + 1)) return null;
+  try {
+    const d = JSON.parse(Utilities.newBlob(Utilities.base64DecodeWebSafe(cuerpo)).getDataAsString('UTF-8'));
+    return d.exp > Date.now() ? d.p : null;
+  } catch (e) {
+    return null;
+  }
 }
 
 const SIN_SESION = { error: 'Tu sesión expiró. Vuelve a entrar.', expirado: true };
@@ -242,14 +282,19 @@ function doGet(e) {
 // la caché del script unos minutos: quien entre después lo recibe sin
 // volver a leer las hojas. Subir archivos o registrar un seguimiento
 // borra esa caché; lo pegado a mano en la hoja se ve al vencer.
+// Con el trigger de precalentar() la caché se rehace cada 10 minutos y
+// nadie espera a que se lean las hojas al abrir.
 // ================================================================
-const CACHE_TODO_SEG = 600;                 // 10 minutos
+const CACHE_TODO_SEG = 900;                 // 15 minutos (el trigger la rehace cada 10)
 const CACHE_TODO_TROZO = 90000;             // la caché acepta hasta 100 KB por valor
 const CACHE_TODO_MAX = 200;                 // trozos (≈18 MB comprimidos) antes de no guardarlo
+const PRECARGA_DESDE = 6, PRECARGA_HASTA = 23;   // horas (hora de México) en que corre la precarga
 
-function todo_() {
-  const guardado = leerCacheTodo_();
-  if (guardado) return guardado;
+function todo_(forzar) {
+  if (!forzar) {
+    const guardado = leerCacheTodo_();
+    if (guardado) return guardado;
+  }
 
   const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
   const cttSheet = ss.getSheetByName(HOJA_CTT);
@@ -312,6 +357,27 @@ function borrarCacheTodo_() {
   try { CacheService.getScriptCache().remove('todo_n'); } catch (e) {}
 }
 
+// Lo corre el trigger cada 10 minutos: vuelve a leer las hojas y deja la
+// caché lista, así quien abre el dashboard recibe los datos de inmediato.
+// De noche no corre, para no gastar la cuota diaria de triggers.
+function precalentar() {
+  const h = Number(Utilities.formatDate(new Date(), 'America/Mexico_City', 'H'));
+  if (h < PRECARGA_DESDE || h >= PRECARGA_HASTA) return;
+  todo_(true);
+}
+
+// Ejecutar UNA vez desde el editor (Ejecutar → instalarPrecarga) para
+// crear el trigger. Volver a ejecutarla no lo duplica.
+function instalarPrecarga() {
+  ScriptApp.getProjectTriggers()
+    .filter(t => t.getHandlerFunction() === 'precalentar')
+    .forEach(t => ScriptApp.deleteTrigger(t));
+  ScriptApp.newTrigger('precalentar').timeBased().everyMinutes(10).create();
+  secretoToken_();
+  todo_(true);
+  Logger.log('Precarga instalada: la caché se rehace cada 10 minutos de ' + PRECARGA_DESDE + ' a ' + PRECARGA_HASTA + ' h.');
+}
+
 // ================================================================
 // doPost — Login y registros de seguimiento desde el dashboard
 // (el cuerpo es JSON; el PIN va aquí y no en la URL)
@@ -323,6 +389,15 @@ function doPost(e) {
     const perfil = data.action === 'login' ? null : perfilDe_(data.token);
     if (data.action === 'login') {
       result = login_(data.numero, data.pin);
+      // con datos: true el login regresa también todo lo de la acción "todo",
+      // así la página no hace una segunda llamada al entrar
+      if (result.ok && data.datos) {
+        let todo;
+        try { todo = todo_(); } catch (e) { todo = { error: e.message }; }
+        result = '{"ok":true,"token":' + JSON.stringify(result.token) +
+          ',"perfil":' + JSON.stringify(result.perfil) + ',"exp":' + result.exp +
+          ',"todo":' + (typeof todo === 'string' ? todo : JSON.stringify(todo)) + '}';
+      }
     } else if (!perfil) {
       result = SIN_SESION;
     } else if (data.action === 'subirCierre' || data.action === 'subirCtt') {
@@ -354,7 +429,7 @@ function doPost(e) {
   }
 
   return ContentService
-    .createTextOutput(JSON.stringify(result))
+    .createTextOutput(typeof result === 'string' ? result : JSON.stringify(result))
     .setMimeType(ContentService.MimeType.JSON);
 }
 
